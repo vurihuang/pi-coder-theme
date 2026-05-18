@@ -19,7 +19,8 @@
     "LICENSE",
     "extensions",
     "themes",
-    "skills"
+    "skills",
+    "screenshots"
   ],
   "scripts": {
     "test": "vitest run",

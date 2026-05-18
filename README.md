@@ -2,6 +2,8 @@
 
 Pi Coder Theme UI for [Pi](https://pi.dev): a Pi Coder Theme dark theme, rounded editor chrome, synchronized thinking-level colors, compact user messages, and bundled compact tool rendering.
 
+![Pi Coder Theme preview](screenshots/pi-coder-theme-preview.png)
+
 ## Install
 
 ```bash
