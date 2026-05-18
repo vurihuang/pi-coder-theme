@@ -1171,7 +1171,12 @@ test("pi-coder-theme editor render stays safe after pi runtime becomes stale", (
     | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
     | undefined;
 
-  const theme = createThemeStub();
+  const theme = createTaggedThemeStub();
+  const editorTheme = {
+    borderColor(text: string) {
+      return text;
+    },
+  } as ThemeStub;
   const sessionStart = expectDefined(handlers.get("session_start"), "session_start handler should be registered");
 
   sessionStart(
@@ -1203,11 +1208,11 @@ test("pi-coder-theme editor render stays safe after pi runtime becomes stale", (
 
   const editor = createEditor(
     { requestRender() {}, terminal: { rows: 24 } },
-    theme,
+    editorTheme,
     { matches: () => false },
   );
 
-  expect(() => editor.render(80)).not.toThrow();
+  expect(editor.render(80).join("\n")).toContain("[text]claude-sonnet-4-20250514");
 
   stale = true;
   expect(() => editor.render(80)).not.toThrow();

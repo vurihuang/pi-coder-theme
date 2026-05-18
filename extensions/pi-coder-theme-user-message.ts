@@ -112,19 +112,41 @@ function patchUserMessageRender(getTheme: () => ThemeLike | undefined, getThinki
   prototype.__piCoderThemeUserMessagePatched = true;
 }
 
+function hasActiveUI(ctx: { hasUI: boolean } | undefined): boolean {
+  if (!ctx) return false;
+  try {
+    return ctx.hasUI;
+  } catch {
+    return false;
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   let activeTheme: ThemeLike | undefined;
   let activeThinkingLevel = "off";
 
   const getTheme = () => activeTheme;
   const getThinkingLevel = () => activeThinkingLevel;
+  const readThinkingLevel = () => {
+    try {
+      return pi.getThinkingLevel();
+    } catch {
+      return activeThinkingLevel;
+    }
+  };
 
   patchUserMessageRender(getTheme, getThinkingLevel);
 
   pi.on("session_start", (_event, ctx) => {
-    if (!ctx.hasUI) return;
-    activeTheme = ctx.ui.theme;
-    activeThinkingLevel = pi.getThinkingLevel();
+    if (!hasActiveUI(ctx)) return;
+
+    try {
+      activeTheme = ctx.ui.theme;
+    } catch {
+      return;
+    }
+
+    activeThinkingLevel = readThinkingLevel();
     patchUserMessageRender(getTheme, getThinkingLevel);
   });
 
@@ -133,7 +155,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", () => {
-    activeThinkingLevel = pi.getThinkingLevel();
+    activeThinkingLevel = readThinkingLevel();
     patchUserMessageRender(getTheme, getThinkingLevel);
   });
 }

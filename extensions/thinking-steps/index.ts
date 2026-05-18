@@ -14,12 +14,21 @@ function hasThinkingContent(event: AssistantMessageEvent): boolean {
   return event.message?.role === "assistant" && Array.isArray(event.message.content) && event.message.content.some((content) => content.type === "thinking");
 }
 
-function requestRender(ctx: ExtensionContext): void {
+function withActiveUI(ctx: ExtensionContext, callback: (ui: ExtensionContext["ui"]) => void): boolean {
   try {
-    (ctx.ui as { requestRender?: () => void }).requestRender?.();
+    if (!ctx.hasUI) return false;
+    callback(ctx.ui);
+    return true;
   } catch {
     // Ignore stale UI contexts after session replacement or shutdown.
+    return false;
   }
+}
+
+function requestRender(ctx: ExtensionContext): void {
+  withActiveUI(ctx, (ui) => {
+    (ui as { requestRender?: () => void }).requestRender?.();
+  });
 }
 
 export default function piCoderThemeThinkingSteps(pi: ExtensionAPI) {
@@ -27,22 +36,22 @@ export default function piCoderThemeThinkingSteps(pi: ExtensionAPI) {
   let degraded = false;
 
   pi.on("session_start", (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    withActiveUI(ctx, (ui) => {
+      setThinkingTheme(ui.theme);
+      degraded = false;
 
-    setThinkingTheme(ctx.ui.theme);
-    degraded = false;
-
-    try {
-      releasePatch = retainThinkingStepsPatch();
-    } catch (error) {
-      degraded = true;
-      releasePatch = undefined;
-      ctx.ui.notify(`Structured thinking unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
-    }
+      try {
+        releasePatch = retainThinkingStepsPatch();
+      } catch (error) {
+        degraded = true;
+        releasePatch = undefined;
+        ui.notify(`Structured thinking unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      }
+    });
   });
 
   pi.on("message_update", (event, ctx) => {
-    if (!ctx.hasUI || degraded) return;
+    if (degraded || !withActiveUI(ctx, () => undefined)) return;
 
     if (hasThinkingContent(event as AssistantMessageEvent)) {
       const contentIndex = (event as AssistantMessageEvent).message?.content?.findIndex((content) => content.type === "thinking");
@@ -53,7 +62,7 @@ export default function piCoderThemeThinkingSteps(pi: ExtensionAPI) {
 
   pi.on("agent_end", (_event, ctx) => {
     clearActiveThinkingState();
-    if (ctx.hasUI && !degraded) requestRender(ctx);
+    if (!degraded) requestRender(ctx);
   });
 
   pi.on("session_shutdown", () => {

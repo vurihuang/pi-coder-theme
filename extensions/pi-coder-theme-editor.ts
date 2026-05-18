@@ -231,10 +231,22 @@ function isChatGptQuotaProvider(provider: string | undefined): boolean {
   return provider === "openai-codex" || /^openai-codex-\d+$/.test(provider || "") || provider === "openai";
 }
 
+function getActiveModel(ctx: ExtensionContext | undefined): ExtensionContext["model"] | undefined {
+  try {
+    return ctx?.model;
+  } catch {
+    return undefined;
+  }
+}
+
 function isUsingOAuth(ctx: ExtensionContext): boolean {
-  const model = ctx.model;
-  if (!model) return false;
-  return Boolean((ctx.modelRegistry as QuotaModelRegistry).isUsingOAuth?.(model));
+  try {
+    const model = ctx.model;
+    if (!model) return false;
+    return Boolean((ctx.modelRegistry as QuotaModelRegistry).isUsingOAuth?.(model));
+  } catch {
+    return false;
+  }
 }
 
 function quotaSnapshotFromSubCoreUsage(usage: SubCoreUsageSnapshot | undefined): ChatGptQuotaSnapshot | undefined {
@@ -259,7 +271,8 @@ function quotaSnapshotFromSubCoreUsage(usage: SubCoreUsageSnapshot | undefined):
 }
 
 function applySubCoreState(ctx: ExtensionContext | undefined, state: SubCoreState | undefined, requestRender: () => void): void {
-  if (!ctx?.model || !isChatGptQuotaProvider(ctx.model.provider) || !isUsingOAuth(ctx)) {
+  const model = getActiveModel(ctx);
+  if (!ctx || !model || !isChatGptQuotaProvider(model.provider) || !isUsingOAuth(ctx)) {
     chatGptQuotaSnapshot = undefined;
     requestRender();
     return;
@@ -312,7 +325,8 @@ function refreshChatGptQuotaFromSubCore(pi: ExtensionAPI, ctx: ExtensionContext,
   chatGptQuotaInFlight = chatGptQuotaInFlight
     .catch(() => undefined)
     .then(async () => {
-      if (!ctx.model || !isChatGptQuotaProvider(ctx.model.provider) || !isUsingOAuth(ctx)) {
+      const model = getActiveModel(ctx);
+      if (!model || !isChatGptQuotaProvider(model.provider) || !isUsingOAuth(ctx)) {
         chatGptQuotaSnapshot = undefined;
         requestRender();
         return;
@@ -439,51 +453,59 @@ function splitEditorRender(lines: string[]): { editorLines: string[]; popupLines
 }
 
 function getSessionCost(ctx: ExtensionContext): UsageCost {
-  let total = 0;
-  let hasCost = false;
+  try {
+    let total = 0;
+    let hasCost = false;
 
-  for (const entry of ctx.sessionManager.getEntries()) {
-    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+    for (const entry of ctx.sessionManager.getEntries()) {
+      if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 
-    const cost = entry.message.usage?.cost?.total;
-    if (typeof cost !== "number" || !Number.isFinite(cost)) continue;
+      const cost = entry.message.usage?.cost?.total;
+      if (typeof cost !== "number" || !Number.isFinite(cost)) continue;
 
-    total += cost;
-    if (cost > 0) hasCost = true;
+      total += cost;
+      if (cost > 0) hasCost = true;
+    }
+
+    const usingSubscription = ctx.model
+      ? Boolean((ctx.modelRegistry as { isUsingOAuth?: (model: NonNullable<ExtensionContext["model"]>) => boolean }).isUsingOAuth?.(ctx.model))
+      : false;
+
+    return { total, hasCost, usingSubscription };
+  } catch {
+    return { total: 0, hasCost: false, usingSubscription: false };
   }
-
-  const usingSubscription = ctx.model
-    ? Boolean((ctx.modelRegistry as { isUsingOAuth?: (model: NonNullable<ExtensionContext["model"]>) => boolean }).isUsingOAuth?.(ctx.model))
-    : false;
-
-  return { total, hasCost, usingSubscription };
 }
 
 function getSessionTokenUsage(ctx: ExtensionContext): TokenUsage {
-  let input = 0;
-  let output = 0;
-  let cacheRead = 0;
-  let cacheWrite = 0;
-  let hasUsage = false;
+  try {
+    let input = 0;
+    let output = 0;
+    let cacheRead = 0;
+    let cacheWrite = 0;
+    let hasUsage = false;
 
-  for (const entry of ctx.sessionManager.getEntries()) {
-    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+    for (const entry of ctx.sessionManager.getEntries()) {
+      if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 
-    const usage = entry.message.usage;
-    if (!usage) continue;
+      const usage = entry.message.usage;
+      if (!usage) continue;
 
-    const inputTokens = Number.isFinite(usage.input) ? usage.input : 0;
-    const outputTokens = Number.isFinite(usage.output) ? usage.output : 0;
-    const readTokens = Number.isFinite(usage.cacheRead) ? usage.cacheRead : 0;
-    const writeTokens = Number.isFinite(usage.cacheWrite) ? usage.cacheWrite : 0;
-    input += inputTokens;
-    output += outputTokens;
-    cacheRead += readTokens;
-    cacheWrite += writeTokens;
-    hasUsage ||= inputTokens > 0 || outputTokens > 0 || readTokens > 0 || writeTokens > 0;
+      const inputTokens = Number.isFinite(usage.input) ? usage.input : 0;
+      const outputTokens = Number.isFinite(usage.output) ? usage.output : 0;
+      const readTokens = Number.isFinite(usage.cacheRead) ? usage.cacheRead : 0;
+      const writeTokens = Number.isFinite(usage.cacheWrite) ? usage.cacheWrite : 0;
+      input += inputTokens;
+      output += outputTokens;
+      cacheRead += readTokens;
+      cacheWrite += writeTokens;
+      hasUsage ||= inputTokens > 0 || outputTokens > 0 || readTokens > 0 || writeTokens > 0;
+    }
+
+    return { input, output, cacheRead, cacheWrite, hasUsage };
+  } catch {
+    return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, hasUsage: false };
   }
-
-  return { input, output, cacheRead, cacheWrite, hasUsage };
 }
 
 function formatTokenUsage(usage: TokenUsage, config = readDisplayConfig()): string | undefined {
@@ -497,8 +519,29 @@ function formatTokenUsage(usage: TokenUsage, config = readDisplayConfig()): stri
   return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
+function hasActiveUI(ctx: ExtensionContext | undefined): ctx is ExtensionContext {
+  if (!ctx) return false;
+  try {
+    return ctx.hasUI;
+  } catch {
+    return false;
+  }
+}
+
+function withActiveUI(ctx: ExtensionContext | undefined, callback: (ui: ExtensionContext["ui"]) => void): void {
+  if (!hasActiveUI(ctx)) return;
+
+  try {
+    callback(ctx.ui);
+  } catch {
+    // Ignore stale UI contexts after session replacement or shutdown.
+  }
+}
+
 function hideBuiltInWorking(ctx: ExtensionContext): void {
-  (ctx.ui as typeof ctx.ui & { setWorkingVisible?: (visible: boolean) => void }).setWorkingVisible?.(false);
+  withActiveUI(ctx, (ui) => {
+    (ui as typeof ui & { setWorkingVisible?: (visible: boolean) => void }).setWorkingVisible?.(false);
+  });
 }
 
 function getUserMessageText(entry: SessionEntry): string | undefined {
@@ -551,22 +594,26 @@ function getRecentSessionHistoryEntries(sessionManager: SessionManagerLike, limi
 }
 
 function seedEditorHistory(editor: HistoryCapableEditor, ctx: ExtensionContext): void {
-  const sessionManager = ctx.sessionManager as SessionManagerLike;
-  const entries = [
-    ...getRecentSessionHistoryEntries(sessionManager),
-    ...sessionManager.getEntries(),
-  ];
+  try {
+    const sessionManager = ctx.sessionManager as SessionManagerLike;
+    const entries = [
+      ...getRecentSessionHistoryEntries(sessionManager),
+      ...sessionManager.getEntries(),
+    ];
 
-  for (const entry of entries) {
-    const text = getUserMessageText(entry);
-    if (text) editor.addToHistory?.(text);
+    for (const entry of entries) {
+      const text = getUserMessageText(entry);
+      if (text) editor.addToHistory?.(text);
+    }
+  } catch {
+    // Ignore stale session managers while the UI is being replaced.
   }
 }
 
 class PiCoderThemeEditor extends CustomEditor {
   constructor(
     tui: any,
-    theme: any,
+    private readonly renderTheme: any,
     keybindings: any,
     private readonly getCtx: () => ExtensionContext,
     private readonly getThinkingLevel: () => string,
@@ -577,11 +624,35 @@ class PiCoderThemeEditor extends CustomEditor {
     private readonly openCommandPalette: (initialQuery: string | undefined, onSelect: (result: CommandPaletteResult) => void) => void,
     private readonly getConfig: () => DisplayConfig,
   ) {
-    super(tui, theme, keybindings, { paddingX: 1 });
+    super(tui, renderTheme, keybindings, { paddingX: 1 });
   }
 
   private get ctx(): ExtensionContext {
     return this.getCtx();
+  }
+
+  private get cwd(): string {
+    try {
+      return this.ctx.cwd;
+    } catch {
+      return process.cwd();
+    }
+  }
+
+  private get model(): ExtensionContext["model"] {
+    try {
+      return this.ctx.model;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private get contextUsage(): ReturnType<ExtensionContext["getContextUsage"]> | undefined {
+    try {
+      return this.ctx.getContextUsage();
+    } catch {
+      return undefined;
+    }
   }
 
   handleInput(data: string): void {
@@ -649,9 +720,9 @@ class PiCoderThemeEditor extends CustomEditor {
   }
 
   private getUsageLabel(): string {
-    const usage = this.ctx.getContextUsage();
+    const usage = this.contextUsage;
     const pct = usage?.percent == null ? "?" : `${Math.max(0, Math.floor(usage.percent))}%`;
-    const contextWindow = usage?.contextWindow ?? this.ctx.model?.contextWindow ?? null;
+    const contextWindow = usage?.contextWindow ?? this.model?.contextWindow ?? null;
     const parts = [` ${pct}/${formatCount(contextWindow)}`];
     const tokenUsage = formatTokenUsage(getSessionTokenUsage(this.ctx), this.getConfig());
 
@@ -678,11 +749,12 @@ class PiCoderThemeEditor extends CustomEditor {
     const thinkingStatus = [thinkingLevel, extensionStatusLabel].filter(Boolean).join("  ");
     const thinkingStatusWidth = visibleWidth(thinkingStatus);
     const modelWidth = Math.max(1, maxWidth - thinkingStatusWidth - 3);
-    const modelLabel = this.ctx.model ? compactModelReference(this.ctx.model, modelWidth) : "model unknown";
-    const model = this.fg("text", modelLabel);
+    const model = this.model;
+    const modelLabel = model ? compactModelReference(model, modelWidth) : "model unknown";
+    const styledModel = this.fg("text", modelLabel);
     const thinking = this.fg(this.getThinkingColor(), thinkingLevel);
     const extensionStatus = extensionStatusLabel ? `  ${this.fg("accent", extensionStatusLabel)}` : "";
-    return ` ${model} ${this.fg("dim", "·")} ${thinking}${extensionStatus} `;
+    return ` ${styledModel} ${this.fg("dim", "·")} ${thinking}${extensionStatus} `;
   }
 
   private getThinkingColor(): ThemeColor {
@@ -704,8 +776,9 @@ class PiCoderThemeEditor extends CustomEditor {
   }
 
   private getCwdLabel(): string {
-    const git = getGitInfo(this.ctx.cwd);
-    return ` ${compactPath(this.ctx.cwd)}${git.branch ? ` (${git.branch})` : ""} `;
+    const cwd = this.cwd;
+    const git = getGitInfo(cwd);
+    return ` ${compactPath(cwd)}${git.branch ? ` (${git.branch})` : ""} `;
   }
 
   private getWorkingLabel(): string {
@@ -725,7 +798,7 @@ class PiCoderThemeEditor extends CustomEditor {
   }
 
   private getGitChangesLabel(): string {
-    const git = getGitInfo(this.ctx.cwd);
+    const git = getGitInfo(this.cwd);
     if (git.changedFiles === 0) return "";
 
     const fileLabel = this.fg("muted", `${git.changedFiles} ${git.changedFiles === 1 ? "file" : "files"} changed`);
@@ -736,7 +809,14 @@ class PiCoderThemeEditor extends CustomEditor {
   }
 
   private fg(color: ThemeColor, text: string): string {
-    return this.ctx.ui.theme.fg(color, text);
+    const renderTheme = this.renderTheme as { fg?: (color: ThemeColor, text: string) => string };
+    if (typeof renderTheme.fg === "function") return renderTheme.fg(color, text);
+
+    try {
+      return this.ctx.ui.theme.fg(color, text);
+    } catch {
+      return text;
+    }
   }
 
   private wrapBody(line: string, innerWidth: number): string {
@@ -849,6 +929,13 @@ export default function (pi: ExtensionAPI) {
   const requestRender = () => activeTui?.requestRender();
   const getConfig = () => readDisplayConfig(configFile);
   const getExtensionStatusLabel = () => [...(footerData?.getExtensionStatuses?.().values() ?? [])].filter(Boolean).join(" ");
+  const readThinkingLevel = () => {
+    try {
+      return pi.getThinkingLevel();
+    } catch {
+      return activeThinkingLevel;
+    }
+  };
   const getElapsedTimeState = (): ElapsedTimeState => {
     if (isWorking && agentStartedAt !== undefined) return { active: true, elapsedMs: Date.now() - agentStartedAt };
     return { active: false, elapsedMs: completedElapsedMs };
@@ -869,7 +956,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   const installFixedEditorCompositor = (ctx: ExtensionContext, tui: TuiLike | undefined) => {
-    if (!ctx.hasUI || !tui?.terminal || typeof (tui.terminal as { write?: unknown }).write !== "function" || !activeEditor) return;
+    if (!hasActiveUI(ctx) || !tui?.terminal || typeof (tui.terminal as { write?: unknown }).write !== "function" || !activeEditor) return;
 
     const editorContainerMatch = findContainerWithChild(tui, activeEditor);
     if (!editorContainerMatch) return;
@@ -952,7 +1039,7 @@ export default function (pi: ExtensionAPI) {
 
   const setWorkingMessage = (message: string, ctx?: ExtensionContext) => {
     workingMessage = message;
-    ctx?.ui.setWorkingMessage(message);
+    withActiveUI(ctx, (ui) => ui.setWorkingMessage(message));
     requestRender();
   };
 
@@ -966,13 +1053,13 @@ export default function (pi: ExtensionAPI) {
     stopQuotaRefreshTimer();
     quotaRefreshTimer = setInterval(() => {
       const latestCtx = activeCtx ?? ctx;
-      if (latestCtx.hasUI) refreshChatGptQuotaFromSubCore(pi, latestCtx, requestRender, true);
+      if (hasActiveUI(latestCtx)) refreshChatGptQuotaFromSubCore(pi, latestCtx, requestRender, true);
     }, getConfig().chatGptQuotaRefreshMs);
   };
 
   const openCommandPalette = (initialQuery = "", onSelect: (result: CommandPaletteResult) => void) => {
     const ctx = activeCtx;
-    if (!ctx?.hasUI || commandPaletteOpen) return;
+    if (!hasActiveUI(ctx) || commandPaletteOpen) return;
 
     const restoreFixedEditor = () => {
       commandPaletteOpen = false;
@@ -984,32 +1071,41 @@ export default function (pi: ExtensionAPI) {
     };
 
     const showPalette = () => {
-      void ctx.ui.custom<CommandPaletteResult | null>(
-        (tui, theme, keybindings, done) => new CommandPaletteOverlay(
-          getCommandPaletteItems(pi),
-          initialQuery,
-          tui,
-          theme,
-          keybindings,
-          done,
-        ),
-        {
-          overlay: true,
-          overlayOptions: {
-            anchor: "center",
-            width: "90%",
-            minWidth: 42,
-            maxHeight: "80%",
-            margin: 1,
+      if (!hasActiveUI(ctx)) {
+        restoreFixedEditor();
+        return;
+      }
+
+      try {
+        void ctx.ui.custom<CommandPaletteResult | null>(
+          (tui, theme, keybindings, done) => new CommandPaletteOverlay(
+            getCommandPaletteItems(pi),
+            initialQuery,
+            tui,
+            theme,
+            keybindings,
+            done,
+          ),
+          {
+            overlay: true,
+            overlayOptions: {
+              anchor: "center",
+              width: "90%",
+              minWidth: 42,
+              maxHeight: "80%",
+              margin: 1,
+            },
           },
-        },
-      ).then((result) => {
+        ).then((result) => {
+          restoreFixedEditor();
+          if (!result) return;
+          onSelect(result);
+        }).catch(() => {
+          restoreFixedEditor();
+        });
+      } catch {
         restoreFixedEditor();
-        if (!result) return;
-        onSelect(result);
-      }).catch(() => {
-        restoreFixedEditor();
-      });
+      }
     };
 
     commandPaletteOpen = true;
@@ -1031,91 +1127,93 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_start", (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!hasActiveUI(ctx)) return;
 
     activeCtx = ctx;
-    activeThinkingLevel = pi.getThinkingLevel();
+    activeThinkingLevel = readThinkingLevel();
     refreshChatGptQuotaFromSubCore(pi, ctx, requestRender);
     startQuotaRefreshTimer(ctx);
 
-    ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-      activeTui = tui;
-      const editor = new PiCoderThemeEditor(tui, theme, keybindings, () => activeCtx ?? ctx, () => activeThinkingLevel, getExtensionStatusLabel, () => ({
-        active: isWorking,
-        message: workingMessage,
-        frame: WORKING_FRAMES[workingFrameIndex] ?? WORKING_FRAMES[0],
-      }), getElapsedTimeState, clearCompletedElapsedTime, openCommandPalette, getConfig);
-      activeEditor = editor;
-      seedEditorHistory(editor, ctx);
-      queueMicrotask(() => installFixedEditorCompositor(ctx, activeTui));
-      return editor;
-    });
+    withActiveUI(ctx, (ui) => {
+      ui.setEditorComponent((tui, theme, keybindings) => {
+        activeTui = tui;
+        const editor = new PiCoderThemeEditor(tui, theme, keybindings, () => activeCtx ?? ctx, () => activeThinkingLevel, getExtensionStatusLabel, () => ({
+          active: isWorking,
+          message: workingMessage,
+          frame: WORKING_FRAMES[workingFrameIndex] ?? WORKING_FRAMES[0],
+        }), getElapsedTimeState, clearCompletedElapsedTime, openCommandPalette, getConfig);
+        activeEditor = editor;
+        seedEditorHistory(editor, ctx);
+        queueMicrotask(() => installFixedEditorCompositor(ctx, activeTui));
+        return editor;
+      });
 
-    hideBuiltInWorking(ctx);
+      hideBuiltInWorking(ctx);
 
-    ctx.ui.setFooter((tui: TuiLike, _theme: unknown, data?: FooterData) => {
-      activeTui = tui;
-      footerData = data;
-      queueMicrotask(() => installFixedEditorCompositor(ctx, activeTui));
-      return {
-        invalidate() {
-          requestRender();
-        },
-        render() {
-          return [];
-        },
-      };
+      ui.setFooter((tui: TuiLike, _theme: unknown, data?: FooterData) => {
+        activeTui = tui;
+        footerData = data;
+        queueMicrotask(() => installFixedEditorCompositor(ctx, activeTui));
+        return {
+          invalidate() {
+            requestRender();
+          },
+          render() {
+            return [];
+          },
+        };
+      });
     });
   });
 
   pi.on("thinking_level_select", (event, ctx) => {
     activeThinkingLevel = event.level;
-    if (ctx.hasUI) requestRender();
+    if (hasActiveUI(ctx)) requestRender();
   });
 
   pi.on("model_select", (_event, ctx) => {
     activeCtx = ctx;
-    if (ctx.hasUI) refreshChatGptQuotaFromSubCore(pi, ctx, requestRender, true);
+    if (hasActiveUI(ctx)) refreshChatGptQuotaFromSubCore(pi, ctx, requestRender, true);
   });
 
   pi.on("before_agent_start", (_event, ctx) => {
-    activeThinkingLevel = pi.getThinkingLevel();
+    activeThinkingLevel = readThinkingLevel();
     activeToolExecutions.clear();
     isWorking = true;
     agentStartedAt = Date.now();
     completedElapsedMs = undefined;
     workingFrameIndex = 0;
     startWorkingTimer();
-    if (!ctx.hasUI) return;
+    if (!hasActiveUI(ctx)) return;
     hideBuiltInWorking(ctx);
     setWorkingMessage("Waiting for response...", ctx);
   });
 
   pi.on("agent_start", (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!hasActiveUI(ctx)) return;
     hideBuiltInWorking(ctx);
   });
 
   pi.on("message_update", (event, ctx) => {
-    if (!ctx.hasUI || event.message.role !== "assistant") return;
+    if (!hasActiveUI(ctx) || event.message.role !== "assistant") return;
     if (activeToolExecutions.size > 0) return;
     setWorkingMessage("Streaming response...", ctx);
   });
 
   pi.on("tool_execution_start", (event, ctx) => {
     activeToolExecutions.add(event.toolCallId);
-    if (!ctx.hasUI) return;
+    if (!hasActiveUI(ctx)) return;
     setWorkingMessage("Running tools...", ctx);
   });
 
   pi.on("tool_execution_update", (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!hasActiveUI(ctx)) return;
     setWorkingMessage("Running tools...", ctx);
   });
 
   pi.on("tool_execution_end", (event, ctx) => {
     activeToolExecutions.delete(event.toolCallId);
-    if (!ctx.hasUI) return;
+    if (!hasActiveUI(ctx)) return;
     if (activeToolExecutions.size === 0) {
       setWorkingMessage("Waiting for response...", ctx);
     }
@@ -1137,7 +1235,9 @@ export default function (pi: ExtensionAPI) {
     stopWorkingTimer();
     stopQuotaRefreshTimer();
     teardownFixedEditorCompositor(true);
+    activeCtx = undefined;
     activeTui = undefined;
     activeEditor = undefined;
+    footerData = undefined;
   });
 }
