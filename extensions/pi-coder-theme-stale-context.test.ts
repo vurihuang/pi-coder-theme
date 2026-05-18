@@ -6,7 +6,8 @@ import { expect, test, vi } from "vitest";
 
 import { UserMessageComponent, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import piCoderThemeEditorExtension, { formatChatGptQuota, parseChatGptQuotaSnapshot } from "./pi-coder-theme-editor.js";
+import piCoderThemeEditorExtension, { formatAgentElapsedTime, formatChatGptQuota, parseChatGptQuotaSnapshot } from "./pi-coder-theme-editor.js";
+import { stripAnsi } from "./pi-coder-theme-command-palette.js";
 import piCoderThemeUserMessageExtension from "./pi-coder-theme-user-message.js";
 
 type EventHandler = (event: unknown, ctx: ExtensionContext) => unknown;
@@ -209,6 +210,19 @@ test("chatgpt quota formatter clamps percentages", () => {
   ));
 
   expect(formatChatGptQuota(snapshot)).toBe("5h 100% / W 0%");
+});
+
+test.each([
+  [5_900, "5s"],
+  [60_000, "1m"],
+  [130_000, "2m10s"],
+  [3_600_000, "1h"],
+  [5_400_000, "1h30m"],
+  [-1, "0s"],
+  [Number.NaN, "0s"],
+] satisfies Array<[number, string]>)
+("agent elapsed time formatter renders compact readable duration for %s", (elapsedMs, expected) => {
+  expect(formatAgentElapsedTime(elapsedMs)).toBe(expected);
 });
 
 test("chatgpt quota parser ignores malformed and unknown windows", () => {
@@ -537,6 +551,131 @@ test("pi-coder-theme editor keeps working message ordered while tools are active
   const agentEnd = expectDefined(handlers.get("agent_end"), "agent_end handler should be registered");
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   expect(workingMessages).toEqual(["Streaming response...", "Running tools...", "Waiting for response..."]);
+});
+
+test("pi-coder-theme editor renders elapsed task time while active and after completion", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-05-18T00:00:00.000Z"));
+
+  try {
+    const { pi, handlers } = createPiStub(() => "medium");
+
+    piCoderThemeEditorExtension(pi);
+
+    let editorFactory:
+      | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[]; handleInput(data: string): void; getText(): string })
+      | undefined;
+    let renderRequests = 0;
+    const ctx = {
+      hasUI: true,
+      cwd: "/tmp",
+      model: {
+        id: "claude-sonnet-4-20250514",
+        contextWindow: 200000,
+        reasoning: true,
+      },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager: createSessionManager(),
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        theme: createThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setWorkingVisible() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext;
+
+    const sessionStart = expectDefined(handlers.get("session_start"), "session_start handler should be registered");
+    sessionStart({ type: "session_start", reason: "startup" }, ctx);
+
+    const createEditor = expectDefined(editorFactory, "editor factory should be registered");
+    const editor = createEditor(
+      { requestRender() { renderRequests += 1; }, terminal: { rows: 24 } },
+      createThemeStub(),
+      { matches: () => false },
+    );
+
+    const beforeAgentStart = expectDefined(handlers.get("before_agent_start"), "before_agent_start handler should be registered");
+    beforeAgentStart({ type: "before_agent_start" }, ctx);
+    vi.setSystemTime(new Date("2026-05-18T00:02:10.000Z"));
+
+    expect(stripAnsi(editor.render(200).join("\n"))).toContain("⏱ 2m10s");
+    expect(stripAnsi(editor.render(200).join("\n"))).toContain("Waiting for response...");
+
+    const agentEnd = expectDefined(handlers.get("agent_end"), "agent_end handler should be registered");
+    agentEnd({ type: "agent_end", messages: [] }, ctx);
+    vi.setSystemTime(new Date("2026-05-18T00:03:00.000Z"));
+
+    const completedRender = stripAnsi(editor.render(200).join("\n"));
+    expect(completedRender).toContain("⏱ 2m10s");
+    expect(completedRender).not.toContain("Waiting for response...");
+
+    editor.handleInput("h");
+    expect(stripAnsi(editor.render(200).join("\n"))).not.toContain("⏱ 2m10s");
+    expect(renderRequests).toBeGreaterThan(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("pi-coder-theme editor keeps completed elapsed time when opening the command palette without selection", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-05-18T00:00:00.000Z"));
+
+  try {
+    const { pi, handlers } = createPiStub(() => "medium");
+
+    piCoderThemeEditorExtension(pi);
+
+    let editorFactory:
+      | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[]; handleInput(data: string): void })
+      | undefined;
+    const ctx = {
+      hasUI: true,
+      cwd: "/tmp",
+      model: {
+        id: "claude-sonnet-4-20250514",
+        contextWindow: 200000,
+        reasoning: true,
+      },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager: createSessionManager(),
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        custom: () => Promise.resolve(null),
+        theme: createThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setWorkingVisible() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext;
+
+    expectDefined(handlers.get("session_start"), "session_start handler should be registered")({ type: "session_start", reason: "startup" }, ctx);
+    const editor = expectDefined(editorFactory, "editor factory should be registered")(
+      { requestRender() {}, terminal: { rows: 24 } },
+      createThemeStub(),
+      { matches: () => false },
+    );
+
+    expectDefined(handlers.get("before_agent_start"), "before_agent_start handler should be registered")({ type: "before_agent_start" }, ctx);
+    vi.setSystemTime(new Date("2026-05-18T00:00:05.000Z"));
+    expectDefined(handlers.get("agent_end"), "agent_end handler should be registered")({ type: "agent_end", messages: [] }, ctx);
+
+    editor.handleInput("/");
+    await Promise.resolve();
+
+    expect(stripAnsi(editor.render(200).join("\n"))).toContain("⏱ 5s");
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("pi-coder-theme editor renders working status with an Esc cancel hint", () => {

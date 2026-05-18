@@ -32,6 +32,11 @@ type WorkingState = {
   frame: string;
 };
 
+type ElapsedTimeState = {
+  active: boolean;
+  elapsedMs: number | undefined;
+};
+
 type GitInfo = {
   branch: string | null;
   changedFiles: number;
@@ -209,6 +214,17 @@ export function formatChatGptQuota(snapshot: ChatGptQuotaSnapshot | undefined): 
   if (snapshot.fiveHour) parts.push(`5h ${formatRemainingQuotaPercent(snapshot.fiveHour)}`);
   if (snapshot.weekly) parts.push(`W ${formatRemainingQuotaPercent(snapshot.weekly)}`);
   return parts.length > 0 ? parts.join(" / ") : undefined;
+}
+
+export function formatAgentElapsedTime(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(Number.isFinite(elapsedMs) ? elapsedMs / 1000 : 0));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) return minutes > 0 ? `${hours}h${minutes}m` : `${hours}h`;
+  if (minutes > 0) return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
+  return `${seconds}s`;
 }
 
 function isChatGptQuotaProvider(provider: string | undefined): boolean {
@@ -556,6 +572,8 @@ class PiCoderThemeEditor extends CustomEditor {
     private readonly getThinkingLevel: () => string,
     private readonly getExtensionStatusLabel: () => string,
     private readonly getWorkingState: () => WorkingState,
+    private readonly getElapsedTimeState: () => ElapsedTimeState,
+    private readonly clearCompletedElapsedTime: () => void,
     private readonly openCommandPalette: (initialQuery: string | undefined, onSelect: (result: CommandPaletteResult) => void) => void,
     private readonly getConfig: () => DisplayConfig,
   ) {
@@ -578,15 +596,19 @@ class PiCoderThemeEditor extends CustomEditor {
       return;
     }
 
+    const before = this.getText();
     super.handleInput(data);
+    if (this.getText() !== before) this.clearCompletedElapsedTime();
   }
 
   private insertCommand(command: string): void {
+    this.clearCompletedElapsedTime();
     this.setText(`/${command} `);
     this.tui.requestRender();
   }
 
   private submitCommand(command: string): void {
+    this.clearCompletedElapsedTime();
     this.setText(`/${command}`);
     const submitValue = (this as unknown as { submitValue?: () => void }).submitValue;
     if (submitValue) {
@@ -613,13 +635,15 @@ class PiCoderThemeEditor extends CustomEditor {
     const rightTop = this.getModelLabel(Math.max(8, Math.floor(innerWidth * 0.48)));
     const cwdLabel = this.getCwdLabel();
     const workingLabel = this.getWorkingLabel();
+    const elapsedTimeLabel = this.getElapsedTimeLabel();
+    const leftStatusLabel = [elapsedTimeLabel, workingLabel].filter(Boolean).join(this.fg("dim", " · "));
     const gitChangesLabel = this.getGitChangesLabel();
 
     return [
       this.borderWithLabels(width, leftTop, rightTop),
       ...body.map((line) => this.wrapBody(line, innerWidth)),
       this.borderWithRightLabel(width, cwdLabel),
-      ...this.statusRows(width, workingLabel, gitChangesLabel),
+      ...this.statusRows(width, leftStatusLabel, gitChangesLabel),
       ...this.wrapPopupBlock(popupLines, width),
     ];
   }
@@ -690,6 +714,14 @@ class PiCoderThemeEditor extends CustomEditor {
 
     const cancelHint = `${this.fg("accent", "Esc")}${this.fg("muted", " to cancel")}`;
     return `${this.fg("accent", working.frame)} ${this.fg("text", working.message)}  ${cancelHint}`;
+  }
+
+  private getElapsedTimeLabel(): string {
+    const elapsed = this.getElapsedTimeState();
+    if (elapsed.elapsedMs === undefined || (elapsed.active && elapsed.elapsedMs < 1000)) return "";
+
+    const color: ThemeColor = elapsed.active ? "accent" : "muted";
+    return `${this.fg(color, "⏱")} ${this.fg(color, formatAgentElapsedTime(elapsed.elapsedMs))}`;
   }
 
   private getGitChangesLabel(): string {
@@ -808,6 +840,8 @@ export default function (pi: ExtensionAPI) {
   let isWorking = false;
   let workingMessage = "Waiting for response...";
   let workingFrameIndex = 0;
+  let agentStartedAt: number | undefined;
+  let completedElapsedMs: number | undefined;
   let workingTimer: ReturnType<typeof setInterval> | undefined;
   let quotaRefreshTimer: ReturnType<typeof setInterval> | undefined;
   const configFile = getConfigFile();
@@ -815,6 +849,15 @@ export default function (pi: ExtensionAPI) {
   const requestRender = () => activeTui?.requestRender();
   const getConfig = () => readDisplayConfig(configFile);
   const getExtensionStatusLabel = () => [...(footerData?.getExtensionStatuses?.().values() ?? [])].filter(Boolean).join(" ");
+  const getElapsedTimeState = (): ElapsedTimeState => {
+    if (isWorking && agentStartedAt !== undefined) return { active: true, elapsedMs: Date.now() - agentStartedAt };
+    return { active: false, elapsedMs: completedElapsedMs };
+  };
+  const clearCompletedElapsedTime = () => {
+    if (isWorking || completedElapsedMs === undefined) return;
+    completedElapsedMs = undefined;
+    requestRender();
+  };
 
   const teardownFixedEditorCompositor = (resetExtendedKeyboardModes = false) => {
     fixedEditorCompositor?.dispose({ resetExtendedKeyboardModes });
@@ -1001,7 +1044,7 @@ export default function (pi: ExtensionAPI) {
         active: isWorking,
         message: workingMessage,
         frame: WORKING_FRAMES[workingFrameIndex] ?? WORKING_FRAMES[0],
-      }), openCommandPalette, getConfig);
+      }), getElapsedTimeState, clearCompletedElapsedTime, openCommandPalette, getConfig);
       activeEditor = editor;
       seedEditorHistory(editor, ctx);
       queueMicrotask(() => installFixedEditorCompositor(ctx, activeTui));
@@ -1039,6 +1082,8 @@ export default function (pi: ExtensionAPI) {
     activeThinkingLevel = pi.getThinkingLevel();
     activeToolExecutions.clear();
     isWorking = true;
+    agentStartedAt = Date.now();
+    completedElapsedMs = undefined;
     workingFrameIndex = 0;
     startWorkingTimer();
     if (!ctx.hasUI) return;
@@ -1077,6 +1122,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", (_event, _ctx) => {
+    completedElapsedMs = agentStartedAt === undefined ? undefined : Date.now() - agentStartedAt;
+    agentStartedAt = undefined;
     isWorking = false;
     activeToolExecutions.clear();
     stopWorkingTimer();
@@ -1084,6 +1131,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    agentStartedAt = undefined;
+    completedElapsedMs = undefined;
+    isWorking = false;
     stopWorkingTimer();
     stopQuotaRefreshTimer();
     teardownFixedEditorCompositor(true);
