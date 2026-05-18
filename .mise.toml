@@ -1,0 +1,22 @@
+[tools]
+node = "24.14.1"
+
+[tasks.install]
+description = "Install dependencies"
+run = "npm install"
+
+[tasks.typecheck]
+description = "Type-check extension sources"
+run = "npm run typecheck"
+
+[tasks.check]
+description = "Verify the Pi package loads without global extensions/themes"
+run = "npm run check"
+
+[tasks.pack-check]
+description = "Inspect npm package contents without publishing"
+run = "npm run pack:check"
+
+[tasks.release-check]
+description = "Run all checks before publishing"
+depends = ["typecheck", "check", "pack-check"]

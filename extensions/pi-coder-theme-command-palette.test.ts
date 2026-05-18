@@ -1,0 +1,284 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { expect, test, vi } from "vitest";
+
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
+
+import piCoderThemeEditorExtension from "./pi-coder-theme-editor.js";
+import { CommandPaletteOverlay, stripAnsi, type CommandPaletteItem, type CommandPaletteResult } from "./pi-coder-theme-command-palette.js";
+
+type ThemeStub = {
+  borderColor(text: string): string;
+  fg(color: string, text: string): string;
+  bold(text: string): string;
+};
+
+type PiCoderThemeEditorLike = {
+  handleInput(data: string): void;
+  getText(): string;
+  render(width: number): string[];
+  onSubmit?: (text: string) => void;
+};
+
+type SessionEntry = ReturnType<ExtensionContext["sessionManager"]["getEntries"]>[number];
+
+function createThemeStub(): ThemeStub {
+  return {
+    borderColor(text: string) {
+      return text;
+    },
+    fg(_color: string, text: string) {
+      return text;
+    },
+    bold(text: string) {
+      return text;
+    },
+  };
+}
+
+function createOverlay(items: CommandPaletteItem[], initialQuery = ""): CommandPaletteOverlay {
+  return new CommandPaletteOverlay(
+    items,
+    initialQuery,
+    { requestRender() {} } as never,
+    createThemeStub() as never,
+    { matches: () => false } as never,
+    () => {},
+  );
+}
+
+function createPaletteKeybindings() {
+  return {
+    matches(data: string, action: string) {
+      return (data === "tab" && action === "tui.input.tab") || (data === "enter" && action === "tui.select.confirm");
+    },
+  };
+}
+
+function pickPaletteItem(item: CommandPaletteItem, key: "tab" | "enter"): CommandPaletteResult | null | undefined {
+  let result: CommandPaletteResult | null | undefined;
+  new CommandPaletteOverlay([item], "", { requestRender() {} } as never, createThemeStub() as never, createPaletteKeybindings() as never, (value) => {
+    result = value;
+  }).handleInput(key);
+  return result;
+}
+
+function createPiCoderThemeEditor(
+  paletteResult: CommandPaletteResult,
+  entries: SessionEntry[] = [],
+  options: { sessionDir?: string; sessionFile?: string } = {},
+): PiCoderThemeEditorLike {
+  const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
+  const pi = {
+    on(event: string, handler: (event: unknown, ctx: ExtensionContext) => void) {
+      handlers.set(event, handler);
+    },
+    getThinkingLevel: () => "medium",
+    getCommands: () => [],
+  };
+
+  piCoderThemeEditorExtension(pi as never);
+
+  let editorFactory:
+    | ((tui: unknown, theme: ThemeStub, keybindings: { matches(data: string, action: string): boolean }) => PiCoderThemeEditorLike)
+    | undefined;
+
+  const sessionStart = handlers.get("session_start");
+  expect(sessionStart).toBeDefined();
+
+  sessionStart?.(
+    { type: "session_start", reason: "startup" },
+    {
+      hasUI: true,
+      cwd: process.cwd(),
+      model: {
+        id: "claude-sonnet-4-20250514",
+        contextWindow: 200000,
+        reasoning: true,
+      },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager: {
+        getEntries: () => entries,
+        getLeafId: () => undefined,
+        getSessionName: () => undefined,
+        getSessionDir: () => options.sessionDir,
+        getSessionFile: () => options.sessionFile,
+      },
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        custom: () => Promise.resolve(paletteResult),
+        theme: createThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setWorkingVisible() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext,
+  );
+
+  expect(editorFactory).toBeDefined();
+  return editorFactory!(
+    { requestRender() {}, terminal: { rows: 24 } },
+    createThemeStub(),
+    {
+      matches(data: string, action: string) {
+        return matchesKey(data, "up") && action === "tui.editor.cursorUp";
+      },
+    },
+  );
+}
+
+test("command palette renders multiline descriptions as one terminal row", () => {
+  const overlay = createOverlay([
+    {
+      name: "skill:pi-subagents",
+      source: "skill",
+      description: "Delegate work.\nContinue safely.",
+    },
+  ]);
+
+  const rendered = overlay.render(96).map(stripAnsi);
+
+  expect(rendered.every((line) => !/[\r\n]/.test(line))).toBe(true);
+  expect(rendered.join("\n")).toContain("Delegate work. Continue safely.");
+});
+
+test.each([
+  [{ name: "settings", source: "builtin" }, "submit"],
+  [{ name: "btw:new", source: "extension" }, "submit"],
+  [{ name: "skill:pi-subagents", source: "skill" }, "insert"],
+  [{ name: "component", source: "prompt" }, "insert"],
+] satisfies Array<[CommandPaletteItem, CommandPaletteResult["action"]]>)
+("command palette enter action follows command source for %s", (item, expectedAction) => {
+  expect(pickPaletteItem(item, "enter")).toEqual({ command: item.name, action: expectedAction });
+});
+
+test.each([
+  { name: "settings", source: "builtin" },
+  { name: "btw:new", source: "extension" },
+  { name: "skill:pi-subagents", source: "skill" },
+  { name: "component", source: "prompt" },
+] satisfies CommandPaletteItem[])("command palette tab always inserts %s", (item) => {
+  expect(pickPaletteItem(item, "tab")).toEqual({ command: item.name, action: "insert" });
+});
+
+test("submitting a command from the palette matches native slash completion", async () => {
+  const editor = createPiCoderThemeEditor({ command: "compact", action: "submit" });
+  const onSubmit = vi.fn();
+  editor.onSubmit = onSubmit;
+
+  editor.handleInput("/");
+  await Promise.resolve();
+
+  expect(onSubmit).toHaveBeenCalledWith("/compact");
+  expect(editor.getText()).toBe("");
+});
+
+test("inserting a command from the palette leaves it editable without submitting", async () => {
+  const editor = createPiCoderThemeEditor({ command: "compact", action: "insert" });
+  const onSubmit = vi.fn();
+  editor.onSubmit = onSubmit;
+
+  editor.handleInput("/");
+  await Promise.resolve();
+
+  expect(onSubmit).not.toHaveBeenCalled();
+  expect(editor.getText()).toBe("/compact ");
+});
+
+test("pi-coder-theme editor restores previous user messages into input history", () => {
+  const editor = createPiCoderThemeEditor({ command: "compact", action: "insert" }, [
+    {
+      type: "message",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "first prompt" }],
+      },
+    } as SessionEntry,
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "assistant response" }],
+      },
+    } as SessionEntry,
+    {
+      type: "message",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "latest prompt" }],
+      },
+    } as SessionEntry,
+  ]);
+
+  editor.handleInput("\x1b[A");
+
+  expect(editor.getText()).toBe("latest prompt");
+});
+
+test("pi-coder-theme editor restores input history when starting an empty new session", () => {
+  const sessionDir = mkdtempSync(`${tmpdir()}/pi-coder-theme-history-test-`);
+
+  try {
+    writeFileSync(join(sessionDir, "2026-01-01T00-00-00_old.jsonl"), [
+      JSON.stringify({ type: "session", version: 3, id: "old", cwd: process.cwd() }),
+      JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "old prompt" }] } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "assistant response" }] } }),
+      JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "newest previous prompt" }] } }),
+      "",
+    ].join("\n"));
+
+    const currentSessionFile = join(sessionDir, "2026-01-02T00-00-00_current.jsonl");
+    writeFileSync(currentSessionFile, `${JSON.stringify({ type: "session", version: 3, id: "current", cwd: process.cwd() })}\n`);
+
+    const editor = createPiCoderThemeEditor(
+      { command: "compact", action: "insert" },
+      [],
+      { sessionDir, sessionFile: currentSessionFile },
+    );
+
+    editor.handleInput("\x1b[A");
+
+    expect(editor.getText()).toBe("newest previous prompt");
+  } finally {
+    rmSync(sessionDir, { recursive: true, force: true });
+  }
+});
+
+test("pi-coder-theme editor shows compact context and token usage", () => {
+  const originalHome = process.env.HOME;
+  const homeDir = mkdtempSync(`${tmpdir()}/pi-coder-theme-command-test-`);
+  process.env.HOME = homeDir;
+
+  try {
+    const editor = createPiCoderThemeEditor({ command: "compact", action: "insert" }, [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "assistant response" }],
+          usage: {
+            input: 1234,
+            output: 2345,
+            cacheRead: 3456,
+            cacheWrite: 456,
+            cost: { total: 0 },
+          },
+        },
+      } as SessionEntry,
+    ]);
+
+    const rendered = editor.render(100).map(stripAnsi).join("\n");
+
+    expect(rendered).toContain("12%/200k");
+    expect(rendered).toContain("↑1k ↓2k R3k W456");
+  } finally {
+    process.env.HOME = originalHome;
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
