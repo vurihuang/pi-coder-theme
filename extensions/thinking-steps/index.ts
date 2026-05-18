@@ -15,7 +15,11 @@ function hasThinkingContent(event: AssistantMessageEvent): boolean {
 }
 
 function requestRender(ctx: ExtensionContext): void {
-  (ctx.ui as { requestRender?: () => void }).requestRender?.();
+  try {
+    (ctx.ui as { requestRender?: () => void }).requestRender?.();
+  } catch {
+    // Ignore stale UI contexts after session replacement or shutdown.
+  }
 }
 
 export default function piCoderThemeThinkingSteps(pi: ExtensionAPI) {
