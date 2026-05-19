@@ -37,6 +37,14 @@ type ElapsedTimeState = {
   elapsedMs: number | undefined;
 };
 
+type BackgroundWorkerState = {
+  provider: string;
+  state: "launching" | "running" | "verifying" | "recovering" | "failed";
+  attempt: number;
+  workerStartedAt: number | null;
+  elapsedMs: number | null;
+};
+
 type GitInfo = {
   branch: string | null;
   changedFiles: number;
@@ -136,6 +144,30 @@ let displayConfigCache: { path: string; mtimeMs: number; at: number; config: Dis
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   return value as Record<string, unknown>;
+}
+
+function normalizeBackgroundWorkerState(value: unknown): { action: "set"; state: BackgroundWorkerState } | { action: "clear" } | { action: "ignore" } {
+  const record = asRecord(value);
+  if (!record || record.version !== 1 || record.provider !== "pi-goal-driven") return { action: "ignore" };
+
+  const state = record.state;
+  if (state === "idle" || state === "brainstorm" || state === "complete") return { action: "clear" };
+  if (state !== "launching" && state !== "running" && state !== "verifying" && state !== "recovering" && state !== "failed") return { action: "ignore" };
+
+  const attempt = typeof record.attempt === "number" && Number.isFinite(record.attempt) ? Math.max(0, Math.floor(record.attempt)) : 0;
+  const workerStartedAt = typeof record.workerStartedAt === "number" && Number.isFinite(record.workerStartedAt) ? record.workerStartedAt : null;
+  const elapsedMs = typeof record.elapsedMs === "number" && Number.isFinite(record.elapsedMs) ? Math.max(0, record.elapsedMs) : null;
+
+  return {
+    action: "set",
+    state: {
+      provider: record.provider,
+      state,
+      attempt,
+      workerStartedAt,
+      elapsedMs,
+    },
+  };
 }
 
 function normalizeQuotaWindow(value: unknown): ChatGptQuotaWindow | undefined {
@@ -620,6 +652,7 @@ class PiCoderThemeEditor extends CustomEditor {
     private readonly getExtensionStatusLabel: () => string,
     private readonly getWorkingState: () => WorkingState,
     private readonly getElapsedTimeState: () => ElapsedTimeState,
+    private readonly getBackgroundWorkerState: () => BackgroundWorkerState | undefined,
     private readonly clearCompletedElapsedTime: () => void,
     private readonly openCommandPalette: (initialQuery: string | undefined, onSelect: (result: CommandPaletteResult) => void) => void,
     private readonly getConfig: () => DisplayConfig,
@@ -707,7 +740,8 @@ class PiCoderThemeEditor extends CustomEditor {
     const cwdLabel = this.getCwdLabel();
     const workingLabel = this.getWorkingLabel();
     const elapsedTimeLabel = this.getElapsedTimeLabel();
-    const leftStatusLabel = [elapsedTimeLabel, workingLabel].filter(Boolean).join(this.fg("dim", " · "));
+    const backgroundWorkerLabel = this.getBackgroundWorkerLabel(innerWidth);
+    const leftStatusLabel = [elapsedTimeLabel, backgroundWorkerLabel, workingLabel].filter(Boolean).join(this.fg("dim", " · "));
     const gitChangesLabel = this.getGitChangesLabel();
 
     return [
@@ -795,6 +829,25 @@ class PiCoderThemeEditor extends CustomEditor {
 
     const color: ThemeColor = elapsed.active ? "accent" : "muted";
     return `${this.fg(color, "⏱")} ${this.fg(color, formatAgentElapsedTime(elapsed.elapsedMs))}`;
+  }
+
+  private getBackgroundWorkerLabel(width: number): string {
+    const worker = this.getBackgroundWorkerState();
+    if (!worker) return "";
+
+    const elapsedMs = worker.workerStartedAt !== null ? Date.now() - worker.workerStartedAt : worker.elapsedMs;
+    const duration = elapsedMs !== null ? formatAgentElapsedTime(elapsedMs) : "";
+    const color: ThemeColor = worker.state === "failed" ? "error" : worker.state === "recovering" ? "warning" : worker.state === "verifying" ? "muted" : "accent";
+    const glyph = worker.state === "running" ? this.getWorkingState().frame : worker.state === "verifying" ? "✓" : worker.state === "recovering" ? "!" : worker.state === "failed" ? "×" : "·";
+    const chart = worker.state === "running" ? this.fg(color, "▁▃▅") : worker.state === "recovering" ? this.fg(color, "▅▃▁") : "";
+    const attempt = worker.attempt > 0 ? `#${worker.attempt}` : "";
+    const rich = [this.fg(color, glyph), this.fg(color, "sub"), this.fg(color, attempt), duration ? this.fg(color, duration) : "", chart].filter(Boolean).join(" ");
+    const normal = [this.fg(color, glyph), this.fg(color, "sub"), this.fg(color, attempt), duration ? this.fg(color, duration) : this.fg(color, worker.state)].filter(Boolean).join(" ");
+    const compact = [this.fg(color, "sub"), attempt ? this.fg(color, attempt) : "", duration ? this.fg(color, duration) : this.fg(color, worker.state)].filter(Boolean).join(" ");
+
+    if (width >= 96) return rich;
+    if (width >= 56) return normal;
+    return compact;
   }
 
   private getGitChangesLabel(): string {
@@ -917,6 +970,7 @@ export default function (pi: ExtensionAPI) {
   let fixedWidgetContainerAbove: Renderable | undefined;
   let fixedWidgetContainerBelow: Renderable | undefined;
   let commandPaletteOpen = false;
+  let backgroundWorkerState: BackgroundWorkerState | undefined;
   let isWorking = false;
   let workingMessage = "Waiting for response...";
   let workingFrameIndex = 0;
@@ -945,6 +999,7 @@ export default function (pi: ExtensionAPI) {
     completedElapsedMs = undefined;
     requestRender();
   };
+  const getBackgroundWorkerState = () => backgroundWorkerState;
 
   const teardownFixedEditorCompositor = (resetExtendedKeyboardModes = false) => {
     fixedEditorCompositor?.dispose({ resetExtendedKeyboardModes });
@@ -1126,6 +1181,13 @@ export default function (pi: ExtensionAPI) {
     applySubCoreState(activeCtx, (payload as { state?: SubCoreState }).state, requestRender);
   });
 
+  pi.events?.on("goal-driven:runtime-status", (payload) => {
+    const next = normalizeBackgroundWorkerState(payload);
+    if (next.action === "ignore") return;
+    backgroundWorkerState = next.action === "set" ? next.state : undefined;
+    requestRender();
+  });
+
   pi.on("session_start", (_event, ctx) => {
     if (!hasActiveUI(ctx)) return;
 
@@ -1141,7 +1203,7 @@ export default function (pi: ExtensionAPI) {
           active: isWorking,
           message: workingMessage,
           frame: WORKING_FRAMES[workingFrameIndex] ?? WORKING_FRAMES[0],
-        }), getElapsedTimeState, clearCompletedElapsedTime, openCommandPalette, getConfig);
+        }), getElapsedTimeState, getBackgroundWorkerState, clearCompletedElapsedTime, openCommandPalette, getConfig);
         activeEditor = editor;
         seedEditorHistory(editor, ctx);
         queueMicrotask(() => installFixedEditorCompositor(ctx, activeTui));
@@ -1231,6 +1293,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     agentStartedAt = undefined;
     completedElapsedMs = undefined;
+    backgroundWorkerState = undefined;
     isWorking = false;
     stopWorkingTimer();
     stopQuotaRefreshTimer();

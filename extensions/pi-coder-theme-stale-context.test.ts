@@ -785,6 +785,204 @@ test("pi-coder-theme editor renders extension statuses next to the thinking leve
   expect(editor.render(200).join("\n")).toMatch(/\[thinkingMedium\]medium  \[accent\]⚡ fast/);
 });
 
+test("pi-coder-theme editor renders Goal-Driven worker status in the left status row", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-05-18T00:10:00.000Z"));
+  const { pi, handlers } = createPiStub(() => "medium");
+
+  piCoderThemeEditorExtension(pi);
+
+  let editorFactory:
+    | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
+    | undefined;
+
+  const sessionStart = expectDefined(handlers.get("session_start"), "session_start handler should be registered");
+  sessionStart(
+    { type: "session_start", reason: "startup" },
+    {
+      hasUI: true,
+      cwd: process.cwd(),
+      model: {
+        id: "claude-sonnet-4-20250514",
+        contextWindow: 200000,
+        reasoning: true,
+      },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager: createSessionManager(),
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        theme: createTaggedThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext,
+  );
+
+  pi.events?.emit("goal-driven:runtime-status", {
+    version: 1,
+    provider: "pi-goal-driven",
+    state: "running",
+    attempt: 2,
+    workerStartedAt: Date.now() - 9 * 60 * 1000 - 54 * 1000,
+    elapsedMs: 9 * 60 * 1000 + 54 * 1000,
+  });
+
+  const createEditor = expectDefined(editorFactory, "editor factory should be registered");
+  const editor = createEditor(
+    { requestRender() {}, terminal: { rows: 24 } },
+    createTaggedThemeStub(),
+    { matches: () => false },
+  );
+
+  const rendered = editor.render(200).join("\n");
+  expect(rendered).toContain("[accent]sub");
+  expect(rendered).toContain("[accent]#2");
+  expect(rendered).toContain("[accent]9m54s");
+  vi.useRealTimers();
+});
+
+test("pi-coder-theme editor clears Goal-Driven worker status on idle event", () => {
+  const { pi, handlers } = createPiStub(() => "medium");
+
+  piCoderThemeEditorExtension(pi);
+
+  let editorFactory:
+    | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
+    | undefined;
+
+  const sessionStart = expectDefined(handlers.get("session_start"), "session_start handler should be registered");
+  sessionStart(
+    { type: "session_start", reason: "startup" },
+    {
+      hasUI: true,
+      cwd: process.cwd(),
+      model: { id: "claude-sonnet-4-20250514", contextWindow: 200000, reasoning: true },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager: createSessionManager(),
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        theme: createTaggedThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext,
+  );
+
+  const createEditor = expectDefined(editorFactory, "editor factory should be registered");
+  const editor = createEditor({ requestRender() {}, terminal: { rows: 24 } }, createTaggedThemeStub(), { matches: () => false });
+
+  pi.events?.emit("goal-driven:runtime-status", {
+    version: 1,
+    provider: "pi-goal-driven",
+    state: "running",
+    attempt: 2,
+    workerStartedAt: Date.now() - 60_000,
+    elapsedMs: 60_000,
+  });
+  expect(editor.render(200).join("\n")).toContain("[accent]sub");
+
+  pi.events?.emit("goal-driven:runtime-status", { version: 1, provider: "pi-goal-driven", state: "idle" });
+  expect(editor.render(200).join("\n")).not.toContain("[accent]sub");
+});
+
+test("pi-coder-theme editor keeps existing Goal-Driven worker status after malformed events", () => {
+  const { pi, handlers } = createPiStub(() => "medium");
+
+  piCoderThemeEditorExtension(pi);
+
+  let editorFactory:
+    | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
+    | undefined;
+
+  const sessionStart = expectDefined(handlers.get("session_start"), "session_start handler should be registered");
+  sessionStart(
+    { type: "session_start", reason: "startup" },
+    {
+      hasUI: true,
+      cwd: process.cwd(),
+      model: { id: "claude-sonnet-4-20250514", contextWindow: 200000, reasoning: true },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager: createSessionManager(),
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        theme: createTaggedThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext,
+  );
+
+  const createEditor = expectDefined(editorFactory, "editor factory should be registered");
+  const editor = createEditor({ requestRender() {}, terminal: { rows: 24 } }, createTaggedThemeStub(), { matches: () => false });
+
+  pi.events?.emit("goal-driven:runtime-status", {
+    version: 1,
+    provider: "pi-goal-driven",
+    state: "running",
+    attempt: 2,
+    workerStartedAt: Date.now() - 60_000,
+    elapsedMs: 60_000,
+  });
+  pi.events?.emit("goal-driven:runtime-status", { version: 2, provider: "pi-goal-driven", state: "running", attempt: 1 });
+  pi.events?.emit("goal-driven:runtime-status", { version: 1, provider: "other", state: "running", attempt: 1 });
+  pi.events?.emit("goal-driven:runtime-status", "bad payload");
+
+  expect(editor.render(200).join("\n")).toContain("[accent]sub");
+  expect(editor.render(200).join("\n")).toContain("[accent]#2");
+});
+
+test("pi-coder-theme editor ignores malformed Goal-Driven worker status events", () => {
+  const { pi, handlers } = createPiStub(() => "medium");
+
+  piCoderThemeEditorExtension(pi);
+
+  let editorFactory:
+    | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
+    | undefined;
+
+  const sessionStart = expectDefined(handlers.get("session_start"), "session_start handler should be registered");
+  sessionStart(
+    { type: "session_start", reason: "startup" },
+    {
+      hasUI: true,
+      cwd: process.cwd(),
+      model: { id: "claude-sonnet-4-20250514", contextWindow: 200000, reasoning: true },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager: createSessionManager(),
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        theme: createTaggedThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext,
+  );
+
+  pi.events?.emit("goal-driven:runtime-status", { version: 2, provider: "pi-goal-driven", state: "running", attempt: 1 });
+  pi.events?.emit("goal-driven:runtime-status", { version: 1, provider: "other", state: "running", attempt: 1 });
+  pi.events?.emit("goal-driven:runtime-status", "bad payload");
+
+  const createEditor = expectDefined(editorFactory, "editor factory should be registered");
+  const editor = createEditor({ requestRender() {}, terminal: { rows: 24 } }, createTaggedThemeStub(), { matches: () => false });
+  expect(editor.render(200).join("\n")).not.toContain("sub");
+});
+
 test("pi-coder-theme editor applies the theme text color to typed input", () => {
   const { pi, handlers } = createPiStub(() => "medium");
 

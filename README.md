@@ -25,6 +25,7 @@ If `npm:pi-tool-display` is installed separately, remove it. `pi-coder-theme` al
 - `pi-coder-theme-dark` theme
 - Pi Coder Theme editor chrome with context, cost, ChatGPT subscription quota, model, thinking level, cwd, branch, and git change summary
 - Working status integrated into the editor status row, with git changes kept on the right
+- Goal-Driven worker status in the editor status row when `pi-goal-driven` publishes structured runtime status events
 - Compact Pi Coder Theme user messages with thinking-level color sync
 - Structured thinking-step display for visible assistant reasoning
 - Bundled `pi-tool-display`
