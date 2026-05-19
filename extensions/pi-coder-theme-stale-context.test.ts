@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -72,6 +73,57 @@ function createTaggedThemeStub(): ThemeStub {
       return text;
     },
   };
+}
+
+function runGit(cwd: string, args: string[]): void {
+  execFileSync("git", args, { cwd, stdio: "ignore" });
+}
+
+async function createChangedGitRepo(parent: string, name: string, fileName = "tracked.txt", before = "one\ntwo\n", after = "one\ntwo changed\nthree\n"): Promise<string> {
+  const repo = join(parent, name);
+  await mkdir(repo, { recursive: true });
+  runGit(repo, ["init", "-b", "main"]);
+  await writeFile(join(repo, fileName), before);
+  runGit(repo, ["add", fileName]);
+  await writeFile(join(repo, fileName), after);
+  return repo;
+}
+
+function renderEditorForCwd(cwd: string, width = 200): string {
+  const { pi, handlers } = createPiStub(() => "medium");
+  piCoderThemeEditorExtension(pi);
+
+  let editorFactory:
+    | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
+    | undefined;
+
+  expectDefined(handlers.get("session_start"), "session_start handler should be registered")(
+    { type: "session_start", reason: "startup" },
+    {
+      hasUI: true,
+      cwd,
+      model: { id: "claude-sonnet-4-20250514", contextWindow: 200000, reasoning: true },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager: createSessionManager(),
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        theme: createThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext,
+  );
+
+  const editor = expectDefined(editorFactory, "editor factory should be registered")(
+    { requestRender() {}, terminal: { rows: 24 } },
+    createThemeStub(),
+    { matches: () => false },
+  );
+  return stripAnsi(editor.render(width).join("\n"));
 }
 
 function createSessionManager(thinkingLevel = "medium") {
@@ -185,6 +237,64 @@ function resetUserMessagePatch(): void {
   delete prototype.__piCoderThemeUserMessageGetTheme;
   delete prototype.__piCoderThemeUserMessageGetThinkingLevel;
 }
+
+test("pi-coder-theme editor renders existing single-repo Git changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-coder-git-repo-"));
+  try {
+    const repo = await createChangedGitRepo(root, "repo");
+    const rendered = renderEditorForCwd(repo);
+    expect(rendered).toContain("1 file changed +1 ~1");
+    expect(rendered).toContain("(main)");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("pi-coder-theme editor omits Git changes for a clean single repo", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-coder-clean-repo-"));
+  try {
+    const repo = join(root, "repo");
+    await mkdir(repo, { recursive: true });
+    runGit(repo, ["init", "-b", "main"]);
+    expect(renderEditorForCwd(repo)).not.toContain("files changed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("pi-coder-theme editor aggregates direct child repo Git changes for a workspace", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "pi-coder-workspace-"));
+  try {
+    await createChangedGitRepo(workspace, "repo-a");
+    await createChangedGitRepo(workspace, "repo-b", "tracked.txt", "alpha\nbeta\n", "alpha changed\nbeta\ngamma\n");
+    await mkdir(join(workspace, "notes"));
+
+    const rendered = renderEditorForCwd(workspace);
+    expect(rendered).toContain("2 files changed +2 ~2");
+    expect(rendered).not.toContain("(master)");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("pi-coder-theme editor ignores nested workspace repos and large workspaces", async () => {
+  const nestedWorkspace = await mkdtemp(join(tmpdir(), "pi-coder-workspace-nested-"));
+  const largeWorkspace = await mkdtemp(join(tmpdir(), "pi-coder-workspace-limit-"));
+  try {
+    await mkdir(join(nestedWorkspace, "group"));
+    await createChangedGitRepo(join(nestedWorkspace, "group"), "repo");
+    expect(renderEditorForCwd(nestedWorkspace)).not.toContain("files changed");
+
+    for (let index = 0; index < 11; index++) {
+      await mkdir(join(largeWorkspace, `child-${index}`));
+    }
+    await createChangedGitRepo(largeWorkspace, "repo-direct");
+    expect(renderEditorForCwd(largeWorkspace)).not.toContain("files changed");
+  } finally {
+    await rm(nestedWorkspace, { recursive: true, force: true });
+    await rm(largeWorkspace, { recursive: true, force: true });
+  }
+});
 
 test("chatgpt quota formatter renders 5-hour and weekly remaining quota", () => {
   const snapshot = parseChatGptQuotaSnapshot(chatGptUsagePayload(

@@ -10,6 +10,8 @@ import { join, relative } from "node:path";
 
 const MIN_BODY_LINES = 2;
 const GIT_CACHE_MS = 2000;
+const WORKSPACE_GIT_CHILD_LIMIT = 10;
+const WORKSPACE_GIT_BUDGET_MS = 350;
 const STATUS_LEFT_INSET = 1;
 const STATUS_RIGHT_INSET = 1;
 const WORKING_FRAMES = ["~", "≈", "≋"];
@@ -380,27 +382,39 @@ function refreshChatGptQuotaFromSubCore(pi: ExtensionAPI, ctx: ExtensionContext,
     });
 }
 
-function runGit(cwd: string, args: string[]): string {
+function remainingGitBudget(deadline: number | undefined): number {
+  return deadline === undefined ? 500 : Math.max(0, Math.min(500, deadline - Date.now()));
+}
+
+function runGit(cwd: string, args: string[], deadline?: number): string {
+  const timeout = remainingGitBudget(deadline);
+  if (timeout <= 0) return "";
+
   try {
     return execFileSync("git", args, {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-      timeout: 500,
+      timeout,
     }).trim();
   } catch {
     return "";
   }
 }
 
-function getGitInfo(cwd: string): GitInfo {
-  const now = Date.now();
-  if (gitCache && gitCache.cwd === cwd && now - gitCache.at < GIT_CACHE_MS) return gitCache.info;
+function emptyGitInfo(branch: string | null = null): GitInfo {
+  return { branch, changedFiles: 0, added: 0, modified: 0, removed: 0 };
+}
 
-  const branch = runGit(cwd, ["branch", "--show-current"]) || null;
-  const porcelain = runGit(cwd, ["status", "--short"]);
+function isGitWorkTree(cwd: string, deadline?: number): boolean {
+  return runGit(cwd, ["rev-parse", "--is-inside-work-tree"], deadline) === "true";
+}
+
+function collectRepoGitInfo(cwd: string, includeBranch: boolean, deadline?: number): GitInfo {
+  const branch = includeBranch ? runGit(cwd, ["branch", "--show-current"], deadline) || null : null;
+  const porcelain = runGit(cwd, ["status", "--short"], deadline);
   const changedFiles = porcelain ? porcelain.split("\n").filter(Boolean).length : 0;
-  const numstat = runGit(cwd, ["diff", "--numstat"]);
+  const numstat = runGit(cwd, ["diff", "--numstat"], deadline);
   let added = 0;
   let removed = 0;
 
@@ -413,7 +427,43 @@ function getGitInfo(cwd: string): GitInfo {
   }
 
   const modified = Math.min(added, removed);
-  const info = { branch, changedFiles, added: added - modified, modified, removed: removed - modified };
+  return { branch, changedFiles, added: added - modified, modified, removed: removed - modified };
+}
+
+function addGitInfo(total: GitInfo, next: GitInfo): void {
+  total.changedFiles += next.changedFiles;
+  total.added += next.added;
+  total.modified += next.modified;
+  total.removed += next.removed;
+}
+
+function collectWorkspaceGitInfo(cwd: string, startedAt: number): GitInfo {
+  const deadline = startedAt + WORKSPACE_GIT_BUDGET_MS;
+  let children: string[] = [];
+  try {
+    children = readdirSync(cwd, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(cwd, entry.name));
+  } catch {
+    return emptyGitInfo();
+  }
+
+  if (children.length > WORKSPACE_GIT_CHILD_LIMIT) return emptyGitInfo();
+
+  const total = emptyGitInfo();
+  for (const child of children) {
+    if (Date.now() >= deadline) break;
+    if (!isGitWorkTree(child, deadline)) continue;
+    addGitInfo(total, collectRepoGitInfo(child, false, deadline));
+  }
+  return total;
+}
+
+function getGitInfo(cwd: string): GitInfo {
+  const now = Date.now();
+  if (gitCache && gitCache.cwd === cwd && now - gitCache.at < GIT_CACHE_MS) return gitCache.info;
+
+  const info = isGitWorkTree(cwd) ? collectRepoGitInfo(cwd, true) : collectWorkspaceGitInfo(cwd, now);
   gitCache = { cwd, at: now, info };
   return info;
 }
