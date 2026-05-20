@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0
+
 - Render structured Goal-Driven worker status in the editor status row when `pi-goal-driven` publishes `goal-driven:runtime-status` events.
 - Show active worker attempt count and elapsed time with width-aware visual accents while preserving existing main-agent timing behavior.
 
