@@ -788,6 +788,64 @@ test("pi-coder-theme editor keeps completed elapsed time when opening the comman
   }
 });
 
+test("pi-coder-theme editor includes async subagent elapsed time in the main elapsed timer", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-05-18T00:00:00.000Z"));
+
+  try {
+    const { pi, handlers } = createPiStub(() => "medium");
+
+    piCoderThemeEditorExtension(pi);
+
+    let editorFactory:
+      | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
+      | undefined;
+    const ctx = {
+      hasUI: true,
+      cwd: "/tmp",
+      model: { id: "claude-sonnet-4-20250514", contextWindow: 200000, reasoning: true },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager: createSessionManager(),
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        theme: createThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext;
+
+    expectDefined(handlers.get("session_start"), "session_start handler should be registered")({ type: "session_start", reason: "startup" }, ctx);
+    const editor = expectDefined(editorFactory, "editor factory should be registered")(
+      { requestRender() {}, terminal: { rows: 24 } },
+      createThemeStub(),
+      { matches: () => false },
+    );
+
+    expectDefined(handlers.get("before_agent_start"), "before_agent_start handler should be registered")({ type: "before_agent_start" }, ctx);
+    pi.events?.emit("subagent:async-started", { id: "run-1" });
+    pi.events?.emit("subagent:async-started", { id: "run-2" });
+    vi.setSystemTime(new Date("2026-05-18T00:00:05.000Z"));
+    expect(stripAnsi(editor.render(200).join("\n"))).toContain("⏱ 5s");
+
+    pi.events?.emit("subagent:async-complete", { id: "run-1", durationMs: 7000 });
+    vi.setSystemTime(new Date("2026-05-18T00:00:06.000Z"));
+    expectDefined(handlers.get("agent_end"), "agent_end handler should be registered")({ type: "agent_end", messages: [] }, ctx);
+    expect(stripAnsi(editor.render(200).join("\n"))).toContain("⏱ 6s");
+
+    vi.setSystemTime(new Date("2026-05-18T00:00:08.000Z"));
+    expect(stripAnsi(editor.render(200).join("\n"))).toContain("⏱ 8s");
+
+    pi.events?.emit("subagent:async-complete", { id: "run-2", durationMs: 7000 });
+    expect(stripAnsi(editor.render(200).join("\n"))).toContain("⏱ 8s");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("pi-coder-theme editor renders working status with an Esc cancel hint", () => {
   const { pi, handlers } = createPiStub(() => "medium");
 
@@ -955,6 +1013,57 @@ test("pi-coder-theme editor renders Goal-Driven worker status in the left status
   vi.useRealTimers();
 });
 
+test("pi-coder-theme editor renders newer Goal-Driven worker status with cumulative elapsed time", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-05-18T00:10:00.000Z"));
+  const { pi, handlers } = createPiStub(() => "medium");
+
+  piCoderThemeEditorExtension(pi);
+
+  let editorFactory:
+    | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
+    | undefined;
+
+  const sessionStart = expectDefined(handlers.get("session_start"), "session_start handler should be registered");
+  sessionStart(
+    { type: "session_start", reason: "startup" },
+    {
+      hasUI: true,
+      cwd: process.cwd(),
+      model: { id: "claude-sonnet-4-20250514", contextWindow: 200000, reasoning: true },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager: createSessionManager(),
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        theme: createTaggedThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext,
+  );
+
+  pi.events?.emit("goal-driven:runtime-status", {
+    version: 2,
+    provider: "pi-goal-driven",
+    state: "running",
+    attempt: 2,
+    workerStartedAt: Date.now() - 90_000,
+    elapsedMs: 11 * 60 * 1000 + 24 * 1000,
+  });
+
+  const createEditor = expectDefined(editorFactory, "editor factory should be registered");
+  const editor = createEditor({ requestRender() {}, terminal: { rows: 24 } }, createTaggedThemeStub(), { matches: () => false });
+  const rendered = editor.render(200).join("\n");
+  expect(rendered).toContain("[accent]sub");
+  expect(rendered).toContain("[accent]#2");
+  expect(rendered).toContain("[accent]11m24s");
+  vi.useRealTimers();
+});
+
 test("pi-coder-theme editor clears Goal-Driven worker status on idle event", () => {
   const { pi, handlers } = createPiStub(() => "medium");
 
@@ -1045,7 +1154,7 @@ test("pi-coder-theme editor keeps existing Goal-Driven worker status after malfo
     workerStartedAt: Date.now() - 60_000,
     elapsedMs: 60_000,
   });
-  pi.events?.emit("goal-driven:runtime-status", { version: 2, provider: "pi-goal-driven", state: "running", attempt: 1 });
+  pi.events?.emit("goal-driven:runtime-status", { version: 3, provider: "pi-goal-driven", state: "running", attempt: 1 });
   pi.events?.emit("goal-driven:runtime-status", { version: 1, provider: "other", state: "running", attempt: 1 });
   pi.events?.emit("goal-driven:runtime-status", "bad payload");
 
@@ -1084,7 +1193,7 @@ test("pi-coder-theme editor ignores malformed Goal-Driven worker status events",
     } as unknown as ExtensionContext,
   );
 
-  pi.events?.emit("goal-driven:runtime-status", { version: 2, provider: "pi-goal-driven", state: "running", attempt: 1 });
+  pi.events?.emit("goal-driven:runtime-status", { version: 3, provider: "pi-goal-driven", state: "running", attempt: 1 });
   pi.events?.emit("goal-driven:runtime-status", { version: 1, provider: "other", state: "running", attempt: 1 });
   pi.events?.emit("goal-driven:runtime-status", "bad payload");
 

@@ -39,6 +39,10 @@ type ElapsedTimeState = {
   elapsedMs: number | undefined;
 };
 
+type SubagentTimingState = {
+  activeRunIds: Set<string>;
+};
+
 type BackgroundWorkerState = {
   provider: string;
   state: "launching" | "running" | "verifying" | "recovering" | "failed";
@@ -148,9 +152,15 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+function normalizeSubagentRunId(value: unknown): string | undefined {
+  const record = asRecord(value);
+  const id = record?.id ?? record?.asyncId ?? record?.runId;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
 function normalizeBackgroundWorkerState(value: unknown): { action: "set"; state: BackgroundWorkerState } | { action: "clear" } | { action: "ignore" } {
   const record = asRecord(value);
-  if (!record || record.version !== 1 || record.provider !== "pi-goal-driven") return { action: "ignore" };
+  if (!record || (record.version !== 1 && record.version !== 2) || record.provider !== "pi-goal-driven") return { action: "ignore" };
 
   const state = record.state;
   if (state === "idle" || state === "brainstorm" || state === "complete") return { action: "clear" };
@@ -885,7 +895,8 @@ class PiCoderThemeEditor extends CustomEditor {
     const worker = this.getBackgroundWorkerState();
     if (!worker) return "";
 
-    const elapsedMs = worker.workerStartedAt !== null ? Date.now() - worker.workerStartedAt : worker.elapsedMs;
+    const liveElapsedMs = worker.workerStartedAt !== null ? Date.now() - worker.workerStartedAt : null;
+    const elapsedMs = liveElapsedMs !== null && worker.elapsedMs !== null ? Math.max(liveElapsedMs, worker.elapsedMs) : liveElapsedMs ?? worker.elapsedMs;
     const duration = elapsedMs !== null ? formatAgentElapsedTime(elapsedMs) : "";
     const color: ThemeColor = worker.state === "failed" ? "error" : worker.state === "recovering" ? "warning" : worker.state === "verifying" ? "muted" : "accent";
     const glyph = worker.state === "running" ? this.getWorkingState().frame : worker.state === "verifying" ? "✓" : worker.state === "recovering" ? "!" : worker.state === "failed" ? "×" : "·";
@@ -1024,8 +1035,9 @@ export default function (pi: ExtensionAPI) {
   let isWorking = false;
   let workingMessage = "Waiting for response...";
   let workingFrameIndex = 0;
-  let agentStartedAt: number | undefined;
+  let executionStartedAt: number | undefined;
   let completedElapsedMs: number | undefined;
+  const subagentTiming: SubagentTimingState = { activeRunIds: new Set() };
   let workingTimer: ReturnType<typeof setInterval> | undefined;
   let quotaRefreshTimer: ReturnType<typeof setInterval> | undefined;
   const configFile = getConfigFile();
@@ -1040,8 +1052,9 @@ export default function (pi: ExtensionAPI) {
       return activeThinkingLevel;
     }
   };
+  const hasActiveExecution = () => isWorking || subagentTiming.activeRunIds.size > 0;
   const getElapsedTimeState = (): ElapsedTimeState => {
-    if (isWorking && agentStartedAt !== undefined) return { active: true, elapsedMs: Date.now() - agentStartedAt };
+    if (hasActiveExecution() && executionStartedAt !== undefined) return { active: true, elapsedMs: Date.now() - executionStartedAt };
     return { active: false, elapsedMs: completedElapsedMs };
   };
   const clearCompletedElapsedTime = () => {
@@ -1238,6 +1251,28 @@ export default function (pi: ExtensionAPI) {
     requestRender();
   });
 
+  pi.events?.on("subagent:async-started", (payload) => {
+    const id = normalizeSubagentRunId(payload);
+    if (!id) return;
+    if (executionStartedAt === undefined) {
+      executionStartedAt = Date.now();
+      completedElapsedMs = undefined;
+    }
+    subagentTiming.activeRunIds.add(id);
+    requestRender();
+  });
+
+  pi.events?.on("subagent:async-complete", (payload) => {
+    const id = normalizeSubagentRunId(payload);
+    if (!id) return;
+    if (!subagentTiming.activeRunIds.delete(id)) return;
+    if (!hasActiveExecution() && executionStartedAt !== undefined) {
+      completedElapsedMs = Date.now() - executionStartedAt;
+      executionStartedAt = undefined;
+    }
+    requestRender();
+  });
+
   pi.on("session_start", (_event, ctx) => {
     if (!hasActiveUI(ctx)) return;
 
@@ -1291,8 +1326,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", (_event, ctx) => {
     activeThinkingLevel = readThinkingLevel();
     activeToolExecutions.clear();
+    if (executionStartedAt === undefined) executionStartedAt = Date.now();
     isWorking = true;
-    agentStartedAt = Date.now();
     completedElapsedMs = undefined;
     workingFrameIndex = 0;
     startWorkingTimer();
@@ -1332,17 +1367,20 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", (_event, _ctx) => {
-    completedElapsedMs = agentStartedAt === undefined ? undefined : Date.now() - agentStartedAt;
-    agentStartedAt = undefined;
     isWorking = false;
+    if (!hasActiveExecution() && executionStartedAt !== undefined) {
+      completedElapsedMs = Date.now() - executionStartedAt;
+      executionStartedAt = undefined;
+    }
     activeToolExecutions.clear();
     stopWorkingTimer();
     requestRender();
   });
 
   pi.on("session_shutdown", () => {
-    agentStartedAt = undefined;
+    executionStartedAt = undefined;
     completedElapsedMs = undefined;
+    subagentTiming.activeRunIds.clear();
     backgroundWorkerState = undefined;
     isWorking = false;
     stopWorkingTimer();
