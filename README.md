@@ -1,5 +1,9 @@
 # pi-coder-theme
 
+[![npm version](https://img.shields.io/npm/v/pi-coder-theme)](https://www.npmjs.com/package/pi-coder-theme)
+[![npm downloads](https://img.shields.io/npm/dm/pi-coder-theme)](https://www.npmjs.com/package/pi-coder-theme)
+[![license](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+
 Pi Coder Theme UI for [Pi](https://pi.dev): a Pi Coder Theme dark theme, rounded editor chrome, synchronized thinking-level colors, compact user messages, and bundled compact tool rendering.
 
 ![Pi Coder Theme preview](screenshots/pi-coder-theme-preview.png)
@@ -47,13 +51,13 @@ npm run pack:check
 For local Pi testing:
 
 ```bash
-pi install /Users/frank/Code/pi-coder-theme
+pi install .
 ```
 
 Switch back to the published package when done:
 
 ```bash
-pi remove /Users/frank/Code/pi-coder-theme
+pi remove .
 pi install npm:pi-coder-theme
 ```
 
