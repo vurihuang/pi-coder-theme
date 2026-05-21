@@ -9,7 +9,11 @@ function mouse(code: number, col: number, row: number, final: "M" | "m" = "M"): 
   return `\x1b[<${code};${col};${row}${final}`;
 }
 
-function createCompositor(lines: string[], onCopySelection = vi.fn()) {
+function createCompositor(
+  lines: string[],
+  onCopySelection = vi.fn(),
+  renderCluster = () => ({ lines: ["editor"], cursor: null }),
+) {
   let listener: InputListener | undefined;
   const writes: string[] = [];
   const terminal: TerminalLike = {
@@ -38,7 +42,7 @@ function createCompositor(lines: string[], onCopySelection = vi.fn()) {
     tui,
     terminal,
     onCopySelection,
-    renderCluster: () => ({ lines: ["editor"], cursor: null }),
+    renderCluster,
   });
   compositor.install();
   tui.render(80);
@@ -82,7 +86,7 @@ test("drag selection copies the selected span on release", () => {
   compositor.dispose();
 });
 
-test("throttles fixed cluster repaints during high-volume terminal writes", () => {
+test("skips unchanged fixed cluster repaints during high-volume terminal writes", () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-05-18T00:00:00.000Z"));
 
@@ -96,11 +100,42 @@ test("throttles fixed cluster repaints during high-volume terminal writes", () =
     expect(writes).toHaveLength(2);
     expect(writes[0]).toContain("editor");
     expect(writes[1]).not.toContain("editor");
+    expect(writes[1]).toContain("\x1b[r");
+    expect(writes[1]).toContain("\x1b[?25l");
+
+    vi.advanceTimersByTime(50);
+
+    expect(writes).toHaveLength(2);
+    compositor.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("repaints changed fixed cluster after write throttle window", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-05-18T00:00:00.000Z"));
+
+  try {
+    let editorLine = "editor";
+    const { compositor, terminal, writes } = createCompositor(
+      ["line"],
+      vi.fn(),
+      () => ({ lines: [editorLine], cursor: null }),
+    );
+    writes.length = 0;
+
+    terminal.write("first output\n");
+    editorLine = "editor updated";
+    terminal.write("second output\n");
+
+    expect(writes).toHaveLength(2);
+    expect(writes[1]).not.toContain("editor updated");
 
     vi.advanceTimersByTime(50);
 
     expect(writes).toHaveLength(3);
-    expect(writes[2]).toContain("editor");
+    expect(writes[2]).toContain("editor updated");
     compositor.dispose();
   } finally {
     vi.useRealTimers();

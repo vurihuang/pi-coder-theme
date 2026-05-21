@@ -384,6 +384,7 @@ export class TerminalSplitCompositor {
   private visibleRootLines: string[] = [];
   private visibleClusterLines: string[] = [];
   private lastPaintedClusterLineCount = 0;
+  private lastPaintedClusterKey: string | null = null;
   private lastClusterPaintAt = 0;
   private pendingClusterRepaint: ReturnType<typeof setTimeout> | null = null;
   private selectionArea: SelectionArea | null = null;
@@ -547,12 +548,10 @@ export class TerminalSplitCompositor {
     const cluster = this.getCluster(width, rawRows);
     if (cluster.lines.length === 0) return;
 
-    this.originalWrite(
-      beginSynchronizedOutput()
-      + buildFixedClusterPaint(this.decorateCluster(cluster), rawRows, width, this.getShowHardwareCursor())
-      + endSynchronizedOutput(),
-    );
-    this.lastPaintedClusterLineCount = cluster.lines.length;
+    const paint = this.buildClusterPaintIfChanged(cluster, rawRows, width);
+    if (!paint) return;
+
+    this.originalWrite(beginSynchronizedOutput() + paint + endSynchronizedOutput());
   }
 
   clearPaintedCluster(): void {
@@ -575,6 +574,7 @@ export class TerminalSplitCompositor {
     buffer += endSynchronizedOutput();
     this.originalWrite(buffer);
     this.lastPaintedClusterLineCount = 0;
+    this.lastPaintedClusterKey = null;
   }
 
   dispose(options: DisposeOptions = {}): void {
@@ -970,10 +970,9 @@ export class TerminalSplitCompositor {
       buffer += sanitizeLine(this.renderSelectionHighlight(this.visibleRootLines[row] ?? "", start + row, "root"), width);
     }
 
-    buffer += buildFixedClusterPaint(this.decorateCluster(cluster), rawRows, width, this.getShowHardwareCursor());
+    buffer += this.buildClusterPaintIfChanged(cluster, rawRows, width, true);
     buffer += endSynchronizedOutput();
     this.originalWrite(buffer);
-    this.lastPaintedClusterLineCount = cluster.lines.length;
   }
 
   private pauseMouseReportingForContextMenu(textToRestoreToClipboard: string | null = null): void {
@@ -1109,14 +1108,33 @@ export class TerminalSplitCompositor {
 
   private consumeWriteRepaint(cluster: FixedEditorClusterRender, rawRows: number, width: number): string {
     const now = Date.now();
-    if (now - this.lastClusterPaintAt >= WRITE_REPAINT_INTERVAL_MS) {
+    const paint = now - this.lastClusterPaintAt >= WRITE_REPAINT_INTERVAL_MS
+      ? this.buildClusterPaintIfChanged(cluster, rawRows, width)
+      : "";
+
+    if (paint) {
       this.lastClusterPaintAt = now;
-      this.lastPaintedClusterLineCount = cluster.lines.length;
-      return buildFixedClusterPaint(this.decorateCluster(cluster), rawRows, width, this.getShowHardwareCursor());
+      return paint;
     }
 
     this.scheduleTrailingClusterRepaint();
-    return "";
+    return resetScrollRegion() + hideCursor();
+  }
+
+  private buildClusterPaintIfChanged(cluster: FixedEditorClusterRender, rawRows: number, width: number, force = false): string {
+    const showHardwareCursor = this.getShowHardwareCursor();
+    const decoratedCluster = this.decorateCluster(cluster);
+    const key = this.clusterPaintKey(decoratedCluster, rawRows, width, showHardwareCursor);
+    if (!force && key === this.lastPaintedClusterKey) return "";
+
+    this.lastPaintedClusterKey = key;
+    this.lastPaintedClusterLineCount = decoratedCluster.lines.length;
+    return buildFixedClusterPaint(decoratedCluster, rawRows, width, showHardwareCursor);
+  }
+
+  private clusterPaintKey(cluster: FixedEditorClusterRender, rawRows: number, width: number, showHardwareCursor: boolean): string {
+    const cursor = cluster.cursor ? `${cluster.cursor.row}:${cluster.cursor.col}` : "";
+    return [rawRows, width, showHardwareCursor ? 1 : 0, cursor, ...cluster.lines].join("\x1f");
   }
 
   private scheduleTrailingClusterRepaint(): void {
