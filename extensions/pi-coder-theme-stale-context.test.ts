@@ -644,12 +644,16 @@ test("pi-coder-theme editor keeps working message ordered while tools are active
 
   const messageUpdate = expectDefined(handlers.get("message_update"), "message_update handler should be registered");
   const toolExecutionStart = expectDefined(handlers.get("tool_execution_start"), "tool_execution_start handler should be registered");
+  const toolExecutionUpdate = expectDefined(handlers.get("tool_execution_update"), "tool_execution_update handler should be registered");
   const toolExecutionEnd = expectDefined(handlers.get("tool_execution_end"), "tool_execution_end handler should be registered");
 
   messageUpdate({ type: "message_update", message: { role: "assistant", content: [] } }, ctx);
   expect(workingMessages).toEqual(["Streaming response..."]);
 
   toolExecutionStart({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: {} }, ctx);
+  expect(workingMessages).toEqual(["Streaming response...", "Running tools..."]);
+
+  toolExecutionUpdate({ type: "tool_execution_update", toolCallId: "tool-1", toolName: "read", output: "chunk" }, ctx);
   expect(workingMessages).toEqual(["Streaming response...", "Running tools..."]);
 
   messageUpdate({ type: "message_update", message: { role: "assistant", content: [] } }, ctx);

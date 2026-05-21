@@ -75,6 +75,7 @@ const CONTEXT_MENU_MOUSE_REPORTING_PAUSE_MS = 1200;
 const CONTEXT_MENU_SELECTION_RESTORE_WINDOW_MS = 5000;
 const CONTEXT_MENU_CLIPBOARD_RESTORE_INTERVAL_MS = 100;
 const DOUBLE_CLICK_MS = 500;
+const WRITE_REPAINT_INTERVAL_MS = 50;
 const DEFAULT_KEYBOARD_SCROLL_SHORTCUTS: KeyboardScrollShortcuts = {
   up: "super+up",
   down: "super+down",
@@ -383,6 +384,8 @@ export class TerminalSplitCompositor {
   private visibleRootLines: string[] = [];
   private visibleClusterLines: string[] = [];
   private lastPaintedClusterLineCount = 0;
+  private lastClusterPaintAt = 0;
+  private pendingClusterRepaint: ReturnType<typeof setTimeout> | null = null;
   private selectionArea: SelectionArea | null = null;
   private selectionAnchor: SelectionPoint | null = null;
   private selectionFocus: SelectionPoint | null = null;
@@ -595,6 +598,10 @@ export class TerminalSplitCompositor {
     if (this.clipboardRestoreTimer) {
       clearTimeout(this.clipboardRestoreTimer);
       this.clipboardRestoreTimer = null;
+    }
+    if (this.pendingClusterRepaint) {
+      clearTimeout(this.pendingClusterRepaint);
+      this.pendingClusterRepaint = null;
     }
 
     this.terminal.write = this.originalWrite;
@@ -1086,18 +1093,41 @@ export class TerminalSplitCompositor {
           : 0;
       const viewportTop = typeof this.tui.previousViewportTop === "number" ? this.tui.previousViewportTop : 0;
       const screenRow = Math.max(1, Math.min(scrollBottom, hardwareCursorRow - viewportTop + 1));
+      const repaint = this.consumeWriteRepaint(cluster, rawRows, width);
       const buffer = beginSynchronizedOutput()
         + setScrollRegion(1, scrollBottom)
         + moveCursor(screenRow, 1)
         + data
-        + buildFixedClusterPaint(this.decorateCluster(cluster), rawRows, width, this.getShowHardwareCursor())
+        + repaint
         + endSynchronizedOutput();
 
       this.originalWrite(buffer);
-      this.lastPaintedClusterLineCount = cluster.lines.length;
     } finally {
       this.writing = false;
     }
+  }
+
+  private consumeWriteRepaint(cluster: FixedEditorClusterRender, rawRows: number, width: number): string {
+    const now = Date.now();
+    if (now - this.lastClusterPaintAt >= WRITE_REPAINT_INTERVAL_MS) {
+      this.lastClusterPaintAt = now;
+      this.lastPaintedClusterLineCount = cluster.lines.length;
+      return buildFixedClusterPaint(this.decorateCluster(cluster), rawRows, width, this.getShowHardwareCursor());
+    }
+
+    this.scheduleTrailingClusterRepaint();
+    return "";
+  }
+
+  private scheduleTrailingClusterRepaint(): void {
+    if (this.pendingClusterRepaint) return;
+
+    const delay = Math.max(1, WRITE_REPAINT_INTERVAL_MS - (Date.now() - this.lastClusterPaintAt));
+    this.pendingClusterRepaint = setTimeout(() => {
+      this.pendingClusterRepaint = null;
+      this.requestRepaint();
+    }, delay);
+    this.pendingClusterRepaint.unref?.();
   }
 
   private getCluster(width: number, terminalRows: number): FixedEditorClusterRender {

@@ -49,6 +49,7 @@ function createCompositor(lines: string[], onCopySelection = vi.fn()) {
       return listener?.(data);
     },
     onCopySelection,
+    terminal,
     tui,
     writes,
   };
@@ -79,4 +80,29 @@ test("drag selection copies the selected span on release", () => {
 
   expect(onCopySelection).toHaveBeenLastCalledWith("this span");
   compositor.dispose();
+});
+
+test("throttles fixed cluster repaints during high-volume terminal writes", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-05-18T00:00:00.000Z"));
+
+  try {
+    const { compositor, terminal, writes } = createCompositor(["line"]);
+    writes.length = 0;
+
+    terminal.write("first output\n");
+    terminal.write("second output\n");
+
+    expect(writes).toHaveLength(2);
+    expect(writes[0]).toContain("editor");
+    expect(writes[1]).not.toContain("editor");
+
+    vi.advanceTimersByTime(50);
+
+    expect(writes).toHaveLength(3);
+    expect(writes[2]).toContain("editor");
+    compositor.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
 });

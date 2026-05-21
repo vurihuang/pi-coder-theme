@@ -1155,7 +1155,8 @@ export default function (pi: ExtensionAPI) {
     }, 160);
   };
 
-  const setWorkingMessage = (message: string, ctx?: ExtensionContext) => {
+  const setWorkingMessage = (message: string, ctx?: ExtensionContext, force = false) => {
+    if (!force && workingMessage === message) return;
     workingMessage = message;
     withActiveUI(ctx, (ui) => ui.setWorkingMessage(message));
     requestRender();
@@ -1333,7 +1334,7 @@ export default function (pi: ExtensionAPI) {
     startWorkingTimer();
     if (!hasActiveUI(ctx)) return;
     hideBuiltInWorking(ctx);
-    setWorkingMessage("Waiting for response...", ctx);
+    setWorkingMessage("Waiting for response...", ctx, true);
   });
 
   pi.on("agent_start", (_event, ctx) => {
