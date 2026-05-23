@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Decouple fixed editor input rendering from cached/debounced status and widget updates to reduce typing lag during background work.
+- Move git, token usage, and cost aggregation out of the editor render path and into asynchronous status snapshot refreshes.
+- Keep editor input to a single immediate repaint while deferring non-critical status refreshes during typing.
+- Add fixed-editor regression coverage for status ticks, cached git/session data, overlay bypass, resize repaint, and selection repaint.
+
 ## 0.2.0
 
 - Render structured Goal-Driven worker status in the editor status row when `pi-goal-driven` publishes `goal-driven:runtime-status` events.

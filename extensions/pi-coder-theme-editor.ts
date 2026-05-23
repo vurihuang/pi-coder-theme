@@ -1,6 +1,19 @@
 import { copyToClipboard, CustomEditor, type ExtensionAPI, type ExtensionContext, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { renderFixedEditorCluster } from "./fixed-editor/cluster.js";
+import {
+  buildBackgroundWorkerLabel,
+  buildCwdLabel,
+  buildElapsedTimeLabel,
+  buildGitChangesLabel,
+  buildModelLabel,
+  buildUsageLabel,
+  buildWorkingLabel,
+  renderStatusRows,
+  StatusLayoutCache,
+  type EditorStatusLayout,
+} from "./fixed-editor/status-layout.js";
+import { StatusRenderScheduler, type StatusRenderDirtyReason } from "./fixed-editor/status-render-scheduler.js";
 import { TerminalSplitCompositor } from "./fixed-editor/terminal-split.js";
 import { BUILTIN_COMMAND_PALETTE_ITEMS, CommandPaletteOverlay, type CommandPaletteItem, type CommandPaletteResult, stripAnsi } from "./pi-coder-theme-command-palette.js";
 import { execFileSync } from "node:child_process";
@@ -12,9 +25,8 @@ const MIN_BODY_LINES = 2;
 const GIT_CACHE_MS = 2000;
 const WORKSPACE_GIT_CHILD_LIMIT = 10;
 const WORKSPACE_GIT_BUDGET_MS = 350;
-const STATUS_LEFT_INSET = 1;
-const STATUS_RIGHT_INSET = 1;
 const WORKING_FRAMES = ["~", "≈", "≋"];
+const STATUS_TICK_MS = 250;
 const FIVE_HOUR_SECONDS = 5 * 60 * 60;
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_CHATGPT_QUOTA_REFRESH_MINUTES = 5;
@@ -76,6 +88,16 @@ type TokenUsage = {
 type DisplayConfig = {
   tokenUsage: boolean;
   chatGptQuotaRefreshMs: number;
+};
+
+type StatusDataSnapshot = {
+  cwd: string;
+  model: ExtensionContext["model"];
+  contextUsage: ReturnType<ExtensionContext["getContextUsage"]> | undefined;
+  tokenUsage: TokenUsage;
+  cost: UsageCost;
+  git: GitInfo;
+  config: DisplayConfig;
 };
 
 type ChatGptQuotaWindow = {
@@ -544,6 +566,16 @@ function splitEditorRender(lines: string[]): { editorLines: string[]; popupLines
   };
 }
 
+function getUsingSubscription(ctx: ExtensionContext): boolean {
+  try {
+    return ctx.model
+      ? Boolean((ctx.modelRegistry as { isUsingOAuth?: (model: NonNullable<ExtensionContext["model"]>) => boolean }).isUsingOAuth?.(ctx.model))
+      : false;
+  } catch {
+    return false;
+  }
+}
+
 function getSessionCost(ctx: ExtensionContext): UsageCost {
   try {
     let total = 0;
@@ -559,13 +591,9 @@ function getSessionCost(ctx: ExtensionContext): UsageCost {
       if (cost > 0) hasCost = true;
     }
 
-    const usingSubscription = ctx.model
-      ? Boolean((ctx.modelRegistry as { isUsingOAuth?: (model: NonNullable<ExtensionContext["model"]>) => boolean }).isUsingOAuth?.(ctx.model))
-      : false;
-
-    return { total, hasCost, usingSubscription };
+    return { total, hasCost, usingSubscription: getUsingSubscription(ctx) };
   } catch {
-    return { total: 0, hasCost: false, usingSubscription: false };
+    return { total: 0, hasCost: false, usingSubscription: getUsingSubscription(ctx) };
   }
 }
 
@@ -702,54 +730,85 @@ function seedEditorHistory(editor: HistoryCapableEditor, ctx: ExtensionContext):
   }
 }
 
+function safeModel(ctx: ExtensionContext): ExtensionContext["model"] {
+  try {
+    return ctx.model;
+  } catch {
+    return undefined;
+  }
+}
+
+function safeContextUsage(ctx: ExtensionContext): ReturnType<ExtensionContext["getContextUsage"]> | undefined {
+  try {
+    return ctx.getContextUsage();
+  } catch {
+    return undefined;
+  }
+}
+
+function safeCwd(ctx: ExtensionContext): string {
+  try {
+    return ctx.cwd;
+  } catch {
+    return process.cwd();
+  }
+}
+
+type EditorRenderRequestTracker = {
+  handlingInput: boolean;
+  requested: boolean;
+};
+
+function wrapEditorTui(tui: any, markEditorInput: () => void, tracker?: EditorRenderRequestTracker): any {
+  return Object.create(tui, {
+    requestRender: {
+      configurable: true,
+      value(force?: boolean) {
+        markEditorInput();
+        if (tracker?.handlingInput) tracker.requested = true;
+        return tui.requestRender?.(force);
+      },
+    },
+  });
+}
+
 class PiCoderThemeEditor extends CustomEditor {
+  private readonly renderRequestTracker: EditorRenderRequestTracker;
+  private bodySnapshot: { innerWidth: number; editorLines: string[]; popupLines: string[] } | undefined;
+  private bodyDirty = true;
+  private asyncInputRenderTimers: Array<ReturnType<typeof setTimeout>> = [];
+
   constructor(
-    tui: any,
+    private readonly baseTui: any,
     private readonly renderTheme: any,
     keybindings: any,
     private readonly getCtx: () => ExtensionContext,
-    private readonly getThinkingLevel: () => string,
-    private readonly getExtensionStatusLabel: () => string,
-    private readonly getWorkingState: () => WorkingState,
-    private readonly getElapsedTimeState: () => ElapsedTimeState,
-    private readonly getBackgroundWorkerState: () => BackgroundWorkerState | undefined,
+    private readonly getStatusLayout: (width: number) => EditorStatusLayout,
     private readonly clearCompletedElapsedTime: () => void,
+    private readonly markEditorInput: () => void,
     private readonly openCommandPalette: (initialQuery: string | undefined, onSelect: (result: CommandPaletteResult) => void) => void,
-    private readonly getConfig: () => DisplayConfig,
   ) {
-    super(tui, renderTheme, keybindings, { paddingX: 1 });
+    const renderRequestTracker: EditorRenderRequestTracker = { handlingInput: false, requested: false };
+    super(wrapEditorTui(baseTui, markEditorInput, renderRequestTracker), renderTheme, keybindings, { paddingX: 1 });
+    this.renderRequestTracker = renderRequestTracker;
+  }
+
+  invalidateEditorBody(): void {
+    this.bodyDirty = true;
+  }
+
+  private requestEditorRender(force?: boolean): void {
+    this.markEditorInput();
+    this.baseTui.requestRender?.(force);
   }
 
   private get ctx(): ExtensionContext {
     return this.getCtx();
   }
 
-  private get cwd(): string {
-    try {
-      return this.ctx.cwd;
-    } catch {
-      return process.cwd();
-    }
-  }
-
-  private get model(): ExtensionContext["model"] {
-    try {
-      return this.ctx.model;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private get contextUsage(): ReturnType<ExtensionContext["getContextUsage"]> | undefined {
-    try {
-      return this.ctx.getContextUsage();
-    } catch {
-      return undefined;
-    }
-  }
-
   handleInput(data: string): void {
     if (data === "/" && this.getText().trim() === "") {
+      this.markEditorInput();
       this.openCommandPalette(undefined, (result) => {
         if (result.action === "insert") {
           this.insertCommand(result.command);
@@ -761,19 +820,42 @@ class PiCoderThemeEditor extends CustomEditor {
     }
 
     const before = this.getText();
-    super.handleInput(data);
-    if (this.getText() !== before) this.clearCompletedElapsedTime();
+    this.renderRequestTracker.handlingInput = true;
+    this.renderRequestTracker.requested = false;
+    try {
+      super.handleInput(data);
+    } finally {
+      this.renderRequestTracker.handlingInput = false;
+    }
+    if (this.getText() !== before) {
+      this.clearCompletedElapsedTime();
+    } else {
+      this.scheduleAsyncInputRenders();
+    }
+    if (!this.renderRequestTracker.requested) this.requestEditorRender();
+  }
+
+  private scheduleAsyncInputRenders(): void {
+    for (const timer of this.asyncInputRenderTimers) clearTimeout(timer);
+    this.asyncInputRenderTimers = [80, 250, 600].map((delay) => {
+      const timer = setTimeout(() => {
+        this.requestEditorRender();
+      }, delay);
+      timer.unref?.();
+      return timer;
+    });
   }
 
   private insertCommand(command: string): void {
     this.clearCompletedElapsedTime();
     this.setText(`/${command} `);
-    this.tui.requestRender();
+    this.requestEditorRender();
   }
 
   private submitCommand(command: string): void {
     this.clearCompletedElapsedTime();
     this.setText(`/${command}`);
+    this.requestEditorRender();
     const submitValue = (this as unknown as { submitValue?: () => void }).submitValue;
     if (submitValue) {
       submitValue.call(this);
@@ -787,139 +869,28 @@ class PiCoderThemeEditor extends CustomEditor {
     if (width < 12) return super.render(width);
 
     const innerWidth = Math.max(1, width - 2);
-    const base = super.render(innerWidth);
-    const { editorLines, popupLines } = splitEditorRender(base);
+    if (this.bodyDirty || !this.bodySnapshot || this.bodySnapshot.innerWidth !== innerWidth) {
+      const base = super.render(innerWidth);
+      const { editorLines, popupLines } = splitEditorRender(base);
+      this.bodySnapshot = { innerWidth, editorLines, popupLines };
+      this.bodyDirty = false;
+    }
+    const { editorLines, popupLines } = this.bodySnapshot;
     const body = [...editorLines];
 
     while (body.length < MIN_BODY_LINES) {
       body.push(" ".repeat(innerWidth));
     }
 
-    const leftTop = this.getUsageLabel();
-    const rightTop = this.getModelLabel(Math.max(8, Math.floor(innerWidth * 0.48)));
-    const cwdLabel = this.getCwdLabel();
-    const workingLabel = this.getWorkingLabel();
-    const elapsedTimeLabel = this.getElapsedTimeLabel();
-    const backgroundWorkerLabel = this.getBackgroundWorkerLabel(innerWidth);
-    const leftStatusLabel = [elapsedTimeLabel, backgroundWorkerLabel, workingLabel].filter(Boolean).join(this.fg("dim", " · "));
-    const gitChangesLabel = this.getGitChangesLabel();
+    const statusLayout = this.getStatusLayout(width);
 
     return [
-      this.borderWithLabels(width, leftTop, rightTop),
+      this.borderWithLabels(width, statusLayout.topLeft, statusLayout.topRight),
       ...body.map((line) => this.wrapBody(line, innerWidth)),
-      this.borderWithRightLabel(width, cwdLabel),
-      ...this.statusRows(width, leftStatusLabel, gitChangesLabel),
+      this.borderWithRightLabel(width, statusLayout.cwd),
+      ...renderStatusRows(width, statusLayout.statusLeft, statusLayout.statusRight),
       ...this.wrapPopupBlock(popupLines, width),
     ];
-  }
-
-  private getUsageLabel(): string {
-    const usage = this.contextUsage;
-    const pct = usage?.percent == null ? "?" : `${Math.max(0, Math.floor(usage.percent))}%`;
-    const contextWindow = usage?.contextWindow ?? this.model?.contextWindow ?? null;
-    const parts = [` ${pct}/${formatCount(contextWindow)}`];
-    const tokenUsage = formatTokenUsage(getSessionTokenUsage(this.ctx), this.getConfig());
-
-    if (tokenUsage) {
-      parts.push(tokenUsage);
-    }
-
-    const cost = getSessionCost(this.ctx);
-    if (cost.hasCost || cost.usingSubscription) {
-      parts.push(`${formatCost(cost.total)}${cost.usingSubscription ? " sub" : ""}`);
-    }
-
-    const chatGptQuota = formatChatGptQuota(chatGptQuotaSnapshot);
-    if (chatGptQuota) {
-      parts.push(chatGptQuota);
-    }
-
-    return `${parts.join(" · ")} `;
-  }
-
-  private getModelLabel(maxWidth: number): string {
-    const thinkingLevel = this.getThinkingLevel();
-    const extensionStatusLabel = this.getExtensionStatusLabel();
-    const thinkingStatus = [thinkingLevel, extensionStatusLabel].filter(Boolean).join("  ");
-    const thinkingStatusWidth = visibleWidth(thinkingStatus);
-    const modelWidth = Math.max(1, maxWidth - thinkingStatusWidth - 3);
-    const model = this.model;
-    const modelLabel = model ? compactModelReference(model, modelWidth) : "model unknown";
-    const styledModel = this.fg("text", modelLabel);
-    const thinking = this.fg(this.getThinkingColor(), thinkingLevel);
-    const extensionStatus = extensionStatusLabel ? `  ${this.fg("accent", extensionStatusLabel)}` : "";
-    return ` ${styledModel} ${this.fg("dim", "·")} ${thinking}${extensionStatus} `;
-  }
-
-  private getThinkingColor(): ThemeColor {
-    switch (this.getThinkingLevel()) {
-      case "minimal":
-        return "thinkingMinimal";
-      case "low":
-        return "thinkingLow";
-      case "medium":
-        return "thinkingMedium";
-      case "high":
-        return "thinkingHigh";
-      case "xhigh":
-        return "thinkingXhigh";
-      case "off":
-      default:
-        return "thinkingOff";
-    }
-  }
-
-  private getCwdLabel(): string {
-    const cwd = this.cwd;
-    const git = getGitInfo(cwd);
-    return ` ${compactPath(cwd)}${git.branch ? ` (${git.branch})` : ""} `;
-  }
-
-  private getWorkingLabel(): string {
-    const working = this.getWorkingState();
-    if (!working.active) return "";
-
-    const cancelHint = `${this.fg("accent", "Esc")}${this.fg("muted", " to cancel")}`;
-    return `${this.fg("accent", working.frame)} ${this.fg("text", working.message)}  ${cancelHint}`;
-  }
-
-  private getElapsedTimeLabel(): string {
-    const elapsed = this.getElapsedTimeState();
-    if (elapsed.elapsedMs === undefined || (elapsed.active && elapsed.elapsedMs < 1000)) return "";
-
-    const color: ThemeColor = elapsed.active ? "accent" : "muted";
-    return `${this.fg(color, "⏱")} ${this.fg(color, formatAgentElapsedTime(elapsed.elapsedMs))}`;
-  }
-
-  private getBackgroundWorkerLabel(width: number): string {
-    const worker = this.getBackgroundWorkerState();
-    if (!worker) return "";
-
-    const liveElapsedMs = worker.workerStartedAt !== null ? Date.now() - worker.workerStartedAt : null;
-    const elapsedMs = liveElapsedMs !== null && worker.elapsedMs !== null ? Math.max(liveElapsedMs, worker.elapsedMs) : liveElapsedMs ?? worker.elapsedMs;
-    const duration = elapsedMs !== null ? formatAgentElapsedTime(elapsedMs) : "";
-    const color: ThemeColor = worker.state === "failed" ? "error" : worker.state === "recovering" ? "warning" : worker.state === "verifying" ? "muted" : "accent";
-    const glyph = worker.state === "running" ? this.getWorkingState().frame : worker.state === "verifying" ? "✓" : worker.state === "recovering" ? "!" : worker.state === "failed" ? "×" : "·";
-    const chart = worker.state === "running" ? this.fg(color, "▁▃▅") : worker.state === "recovering" ? this.fg(color, "▅▃▁") : "";
-    const attempt = worker.attempt > 0 ? `#${worker.attempt}` : "";
-    const rich = [this.fg(color, glyph), this.fg(color, "sub"), this.fg(color, attempt), duration ? this.fg(color, duration) : "", chart].filter(Boolean).join(" ");
-    const normal = [this.fg(color, glyph), this.fg(color, "sub"), this.fg(color, attempt), duration ? this.fg(color, duration) : this.fg(color, worker.state)].filter(Boolean).join(" ");
-    const compact = [this.fg(color, "sub"), attempt ? this.fg(color, attempt) : "", duration ? this.fg(color, duration) : this.fg(color, worker.state)].filter(Boolean).join(" ");
-
-    if (width >= 96) return rich;
-    if (width >= 56) return normal;
-    return compact;
-  }
-
-  private getGitChangesLabel(): string {
-    const git = getGitInfo(this.cwd);
-    if (git.changedFiles === 0) return "";
-
-    const fileLabel = this.fg("muted", `${git.changedFiles} ${git.changedFiles === 1 ? "file" : "files"} changed`);
-    const added = git.added > 0 ? ` ${this.fg("toolDiffAdded", `+${git.added}`)}` : "";
-    const modified = git.modified > 0 ? ` ${this.fg("warning", `~${git.modified}`)}` : "";
-    const removed = git.removed > 0 ? ` ${this.fg("toolDiffRemoved", `-${git.removed}`)}` : "";
-    return `${fileLabel}${added}${modified}${removed}`;
   }
 
   private fg(color: ThemeColor, text: string): string {
@@ -948,20 +919,6 @@ class PiCoderThemeEditor extends CustomEditor {
       const padding = " ".repeat(Math.max(0, width - visibleWidth(clipped)));
       return clipped + padding;
     });
-  }
-
-  private statusRows(width: number, leftLabel: string, rightLabel: string): string[] {
-    if (!leftLabel && !rightLabel) return [];
-
-    const contentWidth = Math.max(1, width - STATUS_LEFT_INSET - STATUS_RIGHT_INSET);
-    const maxLeft = Math.max(0, Math.floor(contentWidth * 0.44));
-    const maxRight = Math.max(0, contentWidth - maxLeft - 2);
-    const left = truncateToWidth(leftLabel, maxLeft, "…");
-    const right = truncateToWidth(rightLabel, maxRight, "…");
-    const gap = " ".repeat(Math.max(1, contentWidth - visibleWidth(left) - visibleWidth(right)));
-    const leftPadding = " ".repeat(Math.min(STATUS_LEFT_INSET, Math.max(0, width - contentWidth)));
-    const rightPadding = " ".repeat(Math.min(STATUS_RIGHT_INSET, Math.max(0, width - contentWidth - visibleWidth(leftPadding))));
-    return [`${leftPadding}${left}${gap}${right}${rightPadding}`];
   }
 
   private borderWithLabels(width: number, leftLabel: string, rightLabel: string): string {
@@ -1038,11 +995,20 @@ export default function (pi: ExtensionAPI) {
   let executionStartedAt: number | undefined;
   let completedElapsedMs: number | undefined;
   const subagentTiming: SubagentTimingState = { activeRunIds: new Set() };
+  const statusLayoutCache = new StatusLayoutCache();
+  let statusScheduler: StatusRenderScheduler | undefined;
+  let editorSnapshotDirty = true;
+  let statusContainerSnapshotDirty = true;
+  let widgetSnapshotDirty = true;
+  let secondarySnapshotDirty = true;
+  let statusDataSnapshot: StatusDataSnapshot | undefined;
+  let statusDataRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  let statusDataRefreshVersion = 0;
   let workingTimer: ReturnType<typeof setInterval> | undefined;
   let quotaRefreshTimer: ReturnType<typeof setInterval> | undefined;
   const configFile = getConfigFile();
 
-  const requestRender = () => activeTui?.requestRender();
+  const requestRender = (force?: boolean) => activeTui?.requestRender(force);
   const getConfig = () => readDisplayConfig(configFile);
   const getExtensionStatusLabel = () => [...(footerData?.getExtensionStatuses?.().values() ?? [])].filter(Boolean).join(" ");
   const readThinkingLevel = () => {
@@ -1057,10 +1023,115 @@ export default function (pi: ExtensionAPI) {
     if (hasActiveExecution() && executionStartedAt !== undefined) return { active: true, elapsedMs: Date.now() - executionStartedAt };
     return { active: false, elapsedMs: completedElapsedMs };
   };
+  const emptyTokenUsage = (): TokenUsage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, hasUsage: false });
+  const emptyCost = (ctx: ExtensionContext): UsageCost => ({ total: 0, hasCost: false, usingSubscription: getUsingSubscription(ctx) });
+  const fallbackStatusDataSnapshot = (ctx: ExtensionContext): StatusDataSnapshot => ({
+    cwd: safeCwd(ctx),
+    model: safeModel(ctx),
+    contextUsage: safeContextUsage(ctx),
+    tokenUsage: emptyTokenUsage(),
+    cost: emptyCost(ctx),
+    git: emptyGitInfo(),
+    config: getConfig(),
+  });
+  const collectStatusDataSnapshot = (ctx: ExtensionContext): StatusDataSnapshot => {
+    const cwd = safeCwd(ctx);
+    return {
+      cwd,
+      model: safeModel(ctx),
+      contextUsage: safeContextUsage(ctx),
+      tokenUsage: getSessionTokenUsage(ctx),
+      cost: getSessionCost(ctx),
+      git: getGitInfo(cwd),
+      config: getConfig(),
+    };
+  };
+  const seedStatusDataSnapshot = (ctx: ExtensionContext, preserveExpensiveFields = false) => {
+    const cwd = safeCwd(ctx);
+    const previous = preserveExpensiveFields ? statusDataSnapshot : undefined;
+    statusDataSnapshot = {
+      cwd,
+      model: safeModel(ctx),
+      contextUsage: safeContextUsage(ctx),
+      tokenUsage: previous?.tokenUsage ?? emptyTokenUsage(),
+      cost: previous?.cost ?? emptyCost(ctx),
+      git: previous?.cwd === cwd ? previous.git : emptyGitInfo(),
+      config: getConfig(),
+    };
+    statusLayoutCache.invalidate();
+  };
+  const scheduleStatusDataRefresh = (ctx: ExtensionContext | undefined = activeCtx, force = false) => {
+    if (!ctx) return;
+    const version = ++statusDataRefreshVersion;
+    if (statusDataRefreshTimer) {
+      clearTimeout(statusDataRefreshTimer);
+      statusDataRefreshTimer = undefined;
+    }
+    statusDataRefreshTimer = setTimeout(() => {
+      statusDataRefreshTimer = undefined;
+      if (version !== statusDataRefreshVersion) return;
+      const latestCtx = activeCtx ?? ctx;
+      if (!hasActiveUI(latestCtx)) return;
+      statusDataSnapshot = collectStatusDataSnapshot(latestCtx);
+      statusLayoutCache.invalidate();
+      if (force) {
+        forceStatusRefresh("status");
+      } else {
+        invalidateStatus("status");
+      }
+    }, 0);
+    statusDataRefreshTimer.unref?.();
+  };
+  const getStatusDataSnapshot = (ctx: ExtensionContext): StatusDataSnapshot => statusDataSnapshot ?? fallbackStatusDataSnapshot(ctx);
+  const markEditorSnapshotDirty = (includeEditorBody: boolean) => {
+    editorSnapshotDirty = true;
+    if (includeEditorBody) activeEditor?.invalidateEditorBody();
+  };
+  const markStatusContainerSnapshotDirty = () => {
+    statusContainerSnapshotDirty = true;
+  };
+  const markWidgetSnapshotDirty = () => {
+    widgetSnapshotDirty = true;
+  };
+  const markFullSnapshotsDirty = () => {
+    markEditorSnapshotDirty(true);
+    markStatusContainerSnapshotDirty();
+    markWidgetSnapshotDirty();
+    secondarySnapshotDirty = true;
+  };
+  const markSnapshotDirtyForReason = (reason: StatusRenderDirtyReason) => {
+    if (reason === "editor") markEditorSnapshotDirty(true);
+    if (reason === "status") {
+      markEditorSnapshotDirty(false);
+      markStatusContainerSnapshotDirty();
+    }
+    if (reason === "widget") markWidgetSnapshotDirty();
+    if (reason === "resize" || reason === "overlay") markFullSnapshotsDirty();
+  };
+  const invalidateStatus = (reason: StatusRenderDirtyReason = "status") => {
+    statusLayoutCache.invalidate();
+    markSnapshotDirtyForReason(reason);
+    fixedEditorCompositor?.invalidateCluster?.(reason);
+    statusScheduler?.markDirty(reason);
+  };
+  const forceStatusRefresh = (reason: StatusRenderDirtyReason = "status") => {
+    statusLayoutCache.invalidate();
+    markSnapshotDirtyForReason(reason);
+    fixedEditorCompositor?.invalidateCluster?.(reason);
+    statusScheduler?.forceRefresh(reason);
+  };
+  const markEditorInput = () => {
+    markEditorSnapshotDirty(true);
+    fixedEditorCompositor?.invalidateCluster?.("editor");
+    statusScheduler?.markEditorInput();
+  };
+  statusScheduler = new StatusRenderScheduler({
+    onRender: () => requestRender(),
+  });
   const clearCompletedElapsedTime = () => {
     if (isWorking || completedElapsedMs === undefined) return;
     completedElapsedMs = undefined;
-    requestRender();
+    invalidateStatus("status");
   };
   const getBackgroundWorkerState = () => backgroundWorkerState;
 
@@ -1071,6 +1142,7 @@ export default function (pi: ExtensionAPI) {
     fixedEditorContainer = undefined;
     fixedWidgetContainerAbove = undefined;
     fixedWidgetContainerBelow = undefined;
+    markFullSnapshotsDirty();
   };
 
   const installFixedEditorCompositor = (ctx: ExtensionContext, tui: TuiLike | undefined) => {
@@ -1106,6 +1178,10 @@ export default function (pi: ExtensionAPI) {
     fixedWidgetContainerAbove = nextWidgetContainerAbove;
     fixedWidgetContainerBelow = nextWidgetContainerBelow;
 
+    let statusContainerSnapshot: { width: number; lines: string[] } | undefined;
+    let editorSnapshot: { width: number; lines: string[] } | undefined;
+    let widgetSnapshot: { width: number; lines: string[] } | undefined;
+    let secondarySnapshot: { width: number; lines: string[] } | undefined;
     let compositor: TerminalSplitCompositor;
     compositor = new TerminalSplitCompositor({
       tui,
@@ -1114,20 +1190,40 @@ export default function (pi: ExtensionAPI) {
       onCopySelection: (text) => {
         void copyToClipboard(text).catch(() => {});
       },
+      onInvalidateCluster: (reason) => {
+        markSnapshotDirtyForReason(reason);
+      },
       renderCluster: (width, terminalRows) => {
-        const statusContainerLines = fixedStatusContainer
-          ? compositor.renderHidden(fixedStatusContainer, width).filter((line) => visibleWidth(line) > 0)
-          : [];
-        const aboveWidgetLines = fixedWidgetContainerAbove ? compositor.renderHidden(fixedWidgetContainerAbove, width) : [];
-        const editorLines = fixedEditorContainer ? compositor.renderHidden(fixedEditorContainer, width) : [];
-        const belowWidgetLines = fixedWidgetContainerBelow ? compositor.renderHidden(fixedWidgetContainerBelow, width) : [];
+        if (statusContainerSnapshotDirty || statusContainerSnapshot?.width !== width) {
+          const statusContainerLines = fixedStatusContainer
+            ? compositor.renderHidden(fixedStatusContainer, width).filter((line) => visibleWidth(line) > 0)
+            : [];
+          statusContainerSnapshot = { width, lines: statusContainerLines };
+          statusContainerSnapshotDirty = false;
+        }
+        if (widgetSnapshotDirty || widgetSnapshot?.width !== width) {
+          const aboveWidgetLines = fixedWidgetContainerAbove ? compositor.renderHidden(fixedWidgetContainerAbove, width) : [];
+          widgetSnapshot = { width, lines: aboveWidgetLines };
+          widgetSnapshotDirty = false;
+        }
+        if (editorSnapshotDirty || editorSnapshot?.width !== width) {
+          const editorLines = fixedEditorContainer ? compositor.renderHidden(fixedEditorContainer, width) : [];
+          editorSnapshot = { width, lines: editorLines };
+          editorSnapshotDirty = false;
+        }
+        if (secondarySnapshotDirty || secondarySnapshot?.width !== width) {
+          const belowWidgetLines = fixedWidgetContainerBelow ? compositor.renderHidden(fixedWidgetContainerBelow, width) : [];
+          secondarySnapshot = { width, lines: belowWidgetLines };
+          secondarySnapshotDirty = false;
+        }
 
         return renderFixedEditorCluster({
           width,
           terminalRows,
-          statusLines: [...aboveWidgetLines, ...statusContainerLines],
-          editorLines,
-          secondaryLines: belowWidgetLines,
+          statusLines: statusContainerSnapshot?.lines ?? [],
+          widgetLines: widgetSnapshot?.lines ?? [],
+          editorLines: editorSnapshot?.lines ?? [],
+          secondaryLines: secondarySnapshot?.lines ?? [],
         });
       },
     });
@@ -1148,18 +1244,19 @@ export default function (pi: ExtensionAPI) {
   };
 
   const startWorkingTimer = () => {
-    stopWorkingTimer();
+    if (workingTimer) return;
     workingTimer = setInterval(() => {
       workingFrameIndex = (workingFrameIndex + 1) % WORKING_FRAMES.length;
-      requestRender();
-    }, 160);
+      invalidateStatus("status");
+    }, STATUS_TICK_MS);
+    workingTimer.unref?.();
   };
 
   const setWorkingMessage = (message: string, ctx?: ExtensionContext, force = false) => {
     if (!force && workingMessage === message) return;
     workingMessage = message;
     withActiveUI(ctx, (ui) => ui.setWorkingMessage(message));
-    requestRender();
+    invalidateStatus("status");
   };
 
   const stopQuotaRefreshTimer = () => {
@@ -1172,7 +1269,7 @@ export default function (pi: ExtensionAPI) {
     stopQuotaRefreshTimer();
     quotaRefreshTimer = setInterval(() => {
       const latestCtx = activeCtx ?? ctx;
-      if (hasActiveUI(latestCtx)) refreshChatGptQuotaFromSubCore(pi, latestCtx, requestRender, true);
+      if (hasActiveUI(latestCtx)) refreshChatGptQuotaFromSubCore(pi, latestCtx, () => invalidateStatus("status"), true);
     }, getConfig().chatGptQuotaRefreshMs);
   };
 
@@ -1238,18 +1335,20 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.events?.on("sub-core:ready", (payload) => {
-    applySubCoreState(activeCtx, (payload as { state?: SubCoreState }).state, requestRender);
+    applySubCoreState(activeCtx, (payload as { state?: SubCoreState }).state, () => invalidateStatus("status"));
   });
 
   pi.events?.on("sub-core:update-current", (payload) => {
-    applySubCoreState(activeCtx, (payload as { state?: SubCoreState }).state, requestRender);
+    applySubCoreState(activeCtx, (payload as { state?: SubCoreState }).state, () => invalidateStatus("status"));
   });
 
   pi.events?.on("goal-driven:runtime-status", (payload) => {
     const next = normalizeBackgroundWorkerState(payload);
     if (next.action === "ignore") return;
     backgroundWorkerState = next.action === "set" ? next.state : undefined;
-    requestRender();
+    if (backgroundWorkerState) startWorkingTimer();
+    if (!backgroundWorkerState && !hasActiveExecution()) stopWorkingTimer();
+    invalidateStatus("status");
   });
 
   pi.events?.on("subagent:async-started", (payload) => {
@@ -1260,7 +1359,8 @@ export default function (pi: ExtensionAPI) {
       completedElapsedMs = undefined;
     }
     subagentTiming.activeRunIds.add(id);
-    requestRender();
+    startWorkingTimer();
+    invalidateStatus("status");
   });
 
   pi.events?.on("subagent:async-complete", (payload) => {
@@ -1271,25 +1371,75 @@ export default function (pi: ExtensionAPI) {
       completedElapsedMs = Date.now() - executionStartedAt;
       executionStartedAt = undefined;
     }
-    requestRender();
+    if (!hasActiveExecution() && !backgroundWorkerState) stopWorkingTimer();
+    invalidateStatus("status");
   });
 
   pi.on("session_start", (_event, ctx) => {
     if (!hasActiveUI(ctx)) return;
 
     activeCtx = ctx;
+    seedStatusDataSnapshot(ctx);
+    markFullSnapshotsDirty();
     activeThinkingLevel = readThinkingLevel();
-    refreshChatGptQuotaFromSubCore(pi, ctx, requestRender);
+    scheduleStatusDataRefresh(ctx);
+    refreshChatGptQuotaFromSubCore(pi, ctx, () => invalidateStatus("status"));
     startQuotaRefreshTimer(ctx);
 
     withActiveUI(ctx, (ui) => {
       ui.setEditorComponent((tui, theme, keybindings) => {
         activeTui = tui;
-        const editor = new PiCoderThemeEditor(tui, theme, keybindings, () => activeCtx ?? ctx, () => activeThinkingLevel, getExtensionStatusLabel, () => ({
+        const fg = (color: ThemeColor, text: string) => {
+          const renderTheme = theme as { fg?: (color: ThemeColor, text: string) => string };
+          if (typeof renderTheme.fg === "function") return renderTheme.fg(color, text);
+          try {
+            return (activeCtx ?? ctx).ui.theme.fg(color, text);
+          } catch {
+            return text;
+          }
+        };
+        const getWorkingState = (): WorkingState => ({
           active: isWorking,
           message: workingMessage,
           frame: WORKING_FRAMES[workingFrameIndex] ?? WORKING_FRAMES[0],
-        }), getElapsedTimeState, getBackgroundWorkerState, clearCompletedElapsedTime, openCommandPalette, getConfig);
+        });
+        const getStatusLayout = (width: number) => statusLayoutCache.get(width, () => {
+          const latestCtx = activeCtx ?? ctx;
+          const snapshot = getStatusDataSnapshot(latestCtx);
+          const innerWidth = Math.max(1, width - 2);
+          const working = getWorkingState();
+          const model = snapshot.model;
+          const usage = snapshot.contextUsage;
+          const pct = usage?.percent == null ? "?" : `${Math.max(0, Math.floor(usage.percent))}%`;
+          const contextWindow = usage?.contextWindow ?? model?.contextWindow ?? null;
+          const usageParts = [` ${pct}/${formatCount(contextWindow)}`];
+          const tokenUsage = formatTokenUsage(snapshot.tokenUsage, snapshot.config);
+          const cost = snapshot.cost;
+          const git = snapshot.git;
+          const chatGptQuota = formatChatGptQuota(chatGptQuotaSnapshot);
+          const elapsedTimeLabel = buildElapsedTimeLabel(getElapsedTimeState(), formatAgentElapsedTime, fg);
+          const backgroundWorkerLabel = buildBackgroundWorkerLabel(getBackgroundWorkerState(), working, innerWidth, formatAgentElapsedTime, fg);
+          const workingLabel = buildWorkingLabel(working, fg);
+
+          if (tokenUsage) usageParts.push(tokenUsage);
+          if (cost.hasCost || cost.usingSubscription) usageParts.push(`${formatCost(cost.total)}${cost.usingSubscription ? " sub" : ""}`);
+          if (chatGptQuota) usageParts.push(chatGptQuota);
+
+          return {
+            topLeft: buildUsageLabel(usageParts),
+            topRight: buildModelLabel(
+              Math.max(8, Math.floor(innerWidth * 0.48)),
+              activeThinkingLevel,
+              getExtensionStatusLabel(),
+              (maxWidth) => model ? compactModelReference(model, maxWidth) : "model unknown",
+              fg,
+            ),
+            cwd: buildCwdLabel(compactPath(snapshot.cwd), git.branch),
+            statusLeft: [elapsedTimeLabel, backgroundWorkerLabel, workingLabel].filter(Boolean).join(fg("dim", " · ")),
+            statusRight: buildGitChangesLabel(git, fg),
+          };
+        });
+        const editor = new PiCoderThemeEditor(tui, theme, keybindings, () => activeCtx ?? ctx, getStatusLayout, clearCompletedElapsedTime, markEditorInput, openCommandPalette);
         activeEditor = editor;
         seedEditorHistory(editor, ctx);
         queueMicrotask(() => installFixedEditorCompositor(ctx, activeTui));
@@ -1304,7 +1454,7 @@ export default function (pi: ExtensionAPI) {
         queueMicrotask(() => installFixedEditorCompositor(ctx, activeTui));
         return {
           invalidate() {
-            requestRender();
+            invalidateStatus("status");
           },
           render() {
             return [];
@@ -1316,12 +1466,17 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("thinking_level_select", (event, ctx) => {
     activeThinkingLevel = event.level;
-    if (hasActiveUI(ctx)) requestRender();
+    if (hasActiveUI(ctx)) invalidateStatus("status");
   });
 
   pi.on("model_select", (_event, ctx) => {
     activeCtx = ctx;
-    if (hasActiveUI(ctx)) refreshChatGptQuotaFromSubCore(pi, ctx, requestRender, true);
+    if (hasActiveUI(ctx)) {
+      seedStatusDataSnapshot(ctx, true);
+      scheduleStatusDataRefresh(ctx, true);
+      refreshChatGptQuotaFromSubCore(pi, ctx, () => forceStatusRefresh("status"), true);
+      forceStatusRefresh("status");
+    }
   });
 
   pi.on("before_agent_start", (_event, ctx) => {
@@ -1346,6 +1501,12 @@ export default function (pi: ExtensionAPI) {
     if (!hasActiveUI(ctx) || event.message.role !== "assistant") return;
     if (activeToolExecutions.size > 0) return;
     setWorkingMessage("Streaming response...", ctx);
+  });
+
+  pi.on("message_end", (event, ctx) => {
+    if (!hasActiveUI(ctx) || event.message.role !== "assistant") return;
+    activeCtx = ctx;
+    scheduleStatusDataRefresh(ctx, true);
   });
 
   pi.on("tool_execution_start", (event, ctx) => {
@@ -1374,8 +1535,9 @@ export default function (pi: ExtensionAPI) {
       executionStartedAt = undefined;
     }
     activeToolExecutions.clear();
-    stopWorkingTimer();
-    requestRender();
+    if (!hasActiveExecution() && !backgroundWorkerState) stopWorkingTimer();
+    scheduleStatusDataRefresh();
+    invalidateStatus("status");
   });
 
   pi.on("session_shutdown", () => {
@@ -1386,6 +1548,14 @@ export default function (pi: ExtensionAPI) {
     isWorking = false;
     stopWorkingTimer();
     stopQuotaRefreshTimer();
+    if (statusDataRefreshTimer) {
+      clearTimeout(statusDataRefreshTimer);
+      statusDataRefreshTimer = undefined;
+    }
+    statusDataRefreshVersion += 1;
+    statusScheduler?.cancel();
+    statusLayoutCache.invalidate();
+    statusDataSnapshot = undefined;
     teardownFixedEditorCompositor(true);
     activeCtx = undefined;
     activeTui = undefined;

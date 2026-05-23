@@ -65,7 +65,7 @@ function createSessionManager() {
   };
 }
 
-test("workspace Git commands share the overall aggregation timeout budget", async () => {
+test("workspace Git commands share the overall aggregation timeout budget outside editor render", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "pi-coder-git-budget-"));
   try {
     await mkdir(join(workspace, "repo-a"));
@@ -120,10 +120,22 @@ test("workspace Git commands share the overall aggregation timeout budget", asyn
       { matches: () => false },
     );
 
+    expect(execFileSyncMock).not.toHaveBeenCalled();
     editor.render(200);
+    editor.render(200);
+    expect(execFileSyncMock).not.toHaveBeenCalled();
 
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(timeouts).toEqual([500, 225, 100]);
     expect(execFileSyncMock).toHaveBeenCalledTimes(3);
+
+    execFileSyncMock.mockClear();
+    timeouts.length = 0;
+    editor.render(200);
+    editor.render(200);
+
+    expect(timeouts).toEqual([]);
+    expect(execFileSyncMock).not.toHaveBeenCalled();
     nowSpy.mockRestore();
   } finally {
     execFileSyncMock.mockReset();

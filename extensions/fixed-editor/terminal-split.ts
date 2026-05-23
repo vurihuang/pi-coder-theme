@@ -1,5 +1,6 @@
 import { isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { FixedEditorClusterRender } from "./cluster.ts";
+import type { StatusRenderDirtyReason } from "./status-render-scheduler.ts";
 
 export interface TerminalLike {
   columns: number;
@@ -21,6 +22,7 @@ interface TerminalSplitCompositorOptions {
   mouseScroll?: boolean;
   keyboardScrollShortcuts?: KeyboardScrollShortcuts;
   onCopySelection?: (text: string) => void;
+  onInvalidateCluster?: (reason: StatusRenderDirtyReason) => void;
 }
 
 interface PatchedRenderable {
@@ -36,6 +38,10 @@ interface RenderPassCluster {
   width: number;
   terminalRows: number;
   cluster: FixedEditorClusterRender;
+}
+
+interface CachedCluster extends RenderPassCluster {
+  revision: number;
 }
 
 type CompositeLineAt = (
@@ -355,6 +361,7 @@ export class TerminalSplitCompositor {
   private readonly mouseScroll: boolean;
   private readonly keyboardScrollShortcuts: KeyboardScrollShortcuts;
   private readonly onCopySelection: ((text: string) => void) | null;
+  private readonly onInvalidateCluster: ((reason: StatusRenderDirtyReason) => void) | null;
   private extendedKeyboardMode: ExtendedKeyboardMode | null = null;
   private readonly rowsDescriptor: PropertyDescriptor | undefined;
   private readonly originalWrite: (data: string) => void;
@@ -371,10 +378,13 @@ export class TerminalSplitCompositor {
   private writing = false;
   private renderPassActive = false;
   private renderPassCluster: RenderPassCluster | null = null;
+  private clusterCache: CachedCluster | null = null;
+  private clusterRevision = 0;
   private renderingCluster = false;
   private renderingScrollableRoot = false;
   private clusterSuppressed = false;
   private checkingOverlay = false;
+  private overlayVisible = false;
   private scrollOffset = 0;
   private maxScrollOffset = 0;
   private lastRootLineCount = 0;
@@ -402,6 +412,7 @@ export class TerminalSplitCompositor {
     this.mouseScroll = options.mouseScroll !== false;
     this.keyboardScrollShortcuts = options.keyboardScrollShortcuts ?? DEFAULT_KEYBOARD_SCROLL_SHORTCUTS;
     this.onCopySelection = options.onCopySelection ?? null;
+    this.onInvalidateCluster = options.onInvalidateCluster ?? null;
     this.rowsDescriptor = descriptorForRows(options.terminal);
     this.originalWrite = options.terminal.write.bind(options.terminal);
     this.originalDoRender = typeof options.tui.doRender === "function" ? options.tui.doRender.bind(options.tui) : null;
@@ -445,6 +456,7 @@ export class TerminalSplitCompositor {
     this.terminal.write = (data: string) => this.write(data);
     if (this.originalDoRender) {
       this.tui.doRender = () => {
+        this.invalidateCluster("widget");
         this.renderPassActive = true;
         this.renderPassCluster = null;
         try {
@@ -529,6 +541,13 @@ export class TerminalSplitCompositor {
     }
 
     return false;
+  }
+
+  invalidateCluster(reason: StatusRenderDirtyReason): void {
+    this.onInvalidateCluster?.(reason);
+    this.clusterRevision += 1;
+    this.clusterCache = null;
+    this.renderPassCluster = null;
   }
 
   setClusterSuppressed(suppressed: boolean): void {
@@ -1159,8 +1178,18 @@ export class TerminalSplitCompositor {
       return this.renderPassCluster.cluster;
     }
 
+    if (
+      this.clusterCache?.width === width &&
+      this.clusterCache.terminalRows === terminalRows &&
+      this.clusterCache.revision === this.clusterRevision
+    ) {
+      this.visibleClusterLines = this.clusterCache.cluster.lines;
+      return this.clusterCache.cluster;
+    }
+
     const cluster = this.withClusterRender(() => this.renderCluster(width, terminalRows));
     this.visibleClusterLines = cluster.lines;
+    this.clusterCache = { width, terminalRows, revision: this.clusterRevision, cluster };
     if (this.renderPassActive) {
       this.renderPassCluster = { width, terminalRows, cluster };
     }
@@ -1187,22 +1216,42 @@ export class TerminalSplitCompositor {
   }
 
   private hasVisibleOverlay(): boolean {
-    if (this.checkingOverlay) return false;
+    if (this.checkingOverlay) return this.overlayVisible;
 
     this.checkingOverlay = true;
     try {
-      if (typeof this.tui.hasOverlay === "function" && this.tui.hasOverlay()) {
-        return true;
-      }
-
-      const overlayStack = Reflect.get(this.tui, "overlayStack");
-      if (!Array.isArray(overlayStack)) {
-        return false;
-      }
-
-      return overlayStack.some((entry) => entry && entry.hidden !== true);
+      const visible = this.readOverlayVisible();
+      this.syncOverlayVisibility(visible);
+      return visible;
     } finally {
       this.checkingOverlay = false;
     }
+  }
+
+  private readOverlayVisible(): boolean {
+    if (typeof this.tui.hasOverlay === "function" && this.tui.hasOverlay()) {
+      return true;
+    }
+
+    const overlayStack = Reflect.get(this.tui, "overlayStack");
+    if (!Array.isArray(overlayStack)) {
+      return false;
+    }
+
+    return overlayStack.some((entry) => entry && entry.hidden !== true);
+  }
+
+  private syncOverlayVisibility(visible: boolean): void {
+    if (this.overlayVisible === visible) return;
+    this.overlayVisible = visible;
+
+    if (visible) {
+      this.clearPaintedCluster();
+      this.originalWrite(beginSynchronizedOutput() + resetScrollRegion() + showCursor() + endSynchronizedOutput());
+      return;
+    }
+
+    this.lastPaintedClusterKey = null;
+    this.requestRender();
   }
 }

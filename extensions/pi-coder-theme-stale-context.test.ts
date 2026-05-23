@@ -89,7 +89,12 @@ async function createChangedGitRepo(parent: string, name: string, fileName = "tr
   return repo;
 }
 
-function renderEditorForCwd(cwd: string, width = 200): string {
+async function flushStatusDataRefresh(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await Promise.resolve();
+}
+
+async function renderEditorForCwd(cwd: string, width = 200): Promise<string> {
   const { pi, handlers } = createPiStub(() => "medium");
   piCoderThemeEditorExtension(pi);
 
@@ -123,6 +128,7 @@ function renderEditorForCwd(cwd: string, width = 200): string {
     createThemeStub(),
     { matches: () => false },
   );
+  await flushStatusDataRefresh();
   return stripAnsi(editor.render(width).join("\n"));
 }
 
@@ -242,7 +248,7 @@ test("pi-coder-theme editor renders existing single-repo Git changes", async () 
   const root = await mkdtemp(join(tmpdir(), "pi-coder-git-repo-"));
   try {
     const repo = await createChangedGitRepo(root, "repo");
-    const rendered = renderEditorForCwd(repo);
+    const rendered = await renderEditorForCwd(repo);
     expect(rendered).toContain("1 file changed +1 ~1");
     expect(rendered).toContain("(main)");
   } finally {
@@ -256,7 +262,7 @@ test("pi-coder-theme editor omits Git changes for a clean single repo", async ()
     const repo = join(root, "repo");
     await mkdir(repo, { recursive: true });
     runGit(repo, ["init", "-b", "main"]);
-    expect(renderEditorForCwd(repo)).not.toContain("files changed");
+    expect(await renderEditorForCwd(repo)).not.toContain("files changed");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -269,7 +275,7 @@ test("pi-coder-theme editor aggregates direct child repo Git changes for a works
     await createChangedGitRepo(workspace, "repo-b", "tracked.txt", "alpha\nbeta\n", "alpha changed\nbeta\ngamma\n");
     await mkdir(join(workspace, "notes"));
 
-    const rendered = renderEditorForCwd(workspace);
+    const rendered = await renderEditorForCwd(workspace);
     expect(rendered).toContain("2 files changed +2 ~2");
     expect(rendered).not.toContain("(master)");
   } finally {
@@ -283,13 +289,13 @@ test("pi-coder-theme editor ignores nested workspace repos and large workspaces"
   try {
     await mkdir(join(nestedWorkspace, "group"));
     await createChangedGitRepo(join(nestedWorkspace, "group"), "repo");
-    expect(renderEditorForCwd(nestedWorkspace)).not.toContain("files changed");
+    expect(await renderEditorForCwd(nestedWorkspace)).not.toContain("files changed");
 
     for (let index = 0; index < 11; index++) {
       await mkdir(join(largeWorkspace, `child-${index}`));
     }
     await createChangedGitRepo(largeWorkspace, "repo-direct");
-    expect(renderEditorForCwd(largeWorkspace)).not.toContain("files changed");
+    expect(await renderEditorForCwd(largeWorkspace)).not.toContain("files changed");
   } finally {
     await rm(nestedWorkspace, { recursive: true, force: true });
     await rm(largeWorkspace, { recursive: true, force: true });
@@ -728,11 +734,187 @@ test("pi-coder-theme editor renders elapsed task time while active and after com
     expect(completedRender).toContain("⏱ 2m10s");
     expect(completedRender).not.toContain("Waiting for response...");
 
+    const beforeInputRequests = renderRequests;
     editor.handleInput("h");
     expect(stripAnsi(editor.render(200).join("\n"))).not.toContain("⏱ 2m10s");
-    expect(renderRequests).toBeGreaterThan(0);
+    expect(renderRequests - beforeInputRequests).toBe(1);
   } finally {
     vi.useRealTimers();
+  }
+});
+
+test("pi-coder-theme editor working ticks reuse cached session usage", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-05-18T00:00:00.000Z"));
+
+  try {
+    const { pi, handlers } = createPiStub(() => "medium");
+    piCoderThemeEditorExtension(pi);
+
+    const getEntries = vi.fn(() => [
+      {
+        type: "message",
+        id: "assistant-usage",
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: [],
+          usage: {
+            input: 1200,
+            output: 800,
+            cost: { total: 0.0123 },
+          },
+        },
+      },
+    ]);
+    const sessionManager = {
+      getEntries,
+      getLeafId() {
+        return "assistant-usage";
+      },
+      getSessionName() {
+        return undefined;
+      },
+    };
+
+    let editorFactory:
+      | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
+      | undefined;
+    const ctx = {
+      hasUI: true,
+      cwd: "/tmp",
+      model: { id: "claude-sonnet-4-20250514", contextWindow: 200000, reasoning: true },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager,
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        theme: createThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setWorkingVisible() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext;
+
+    expectDefined(handlers.get("session_start"), "session_start handler should be registered")({ type: "session_start", reason: "startup" }, ctx);
+    const editor = expectDefined(editorFactory, "editor factory should be registered")(
+      { requestRender() {}, terminal: { rows: 24 } },
+      createThemeStub(),
+      { matches: () => false },
+    );
+
+    getEntries.mockClear();
+    expect(stripAnsi(editor.render(200).join("\n"))).not.toContain("$0.012");
+    expect(getEntries).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(0);
+    const callsAfterSetup = getEntries.mock.calls.length;
+    const initialRender = stripAnsi(editor.render(200).join("\n"));
+    expect(initialRender).toContain("$0.012");
+    expect(getEntries).toHaveBeenCalledTimes(callsAfterSetup);
+
+    expectDefined(handlers.get("before_agent_start"), "before_agent_start handler should be registered")({ type: "before_agent_start" }, ctx);
+    vi.setSystemTime(new Date("2026-05-18T00:00:01.000Z"));
+    vi.advanceTimersByTime(250);
+    expect(stripAnsi(editor.render(200).join("\n"))).toContain("⏱ 1s");
+    vi.setSystemTime(new Date("2026-05-18T00:00:02.000Z"));
+    vi.advanceTimersByTime(250);
+    expect(stripAnsi(editor.render(200).join("\n"))).toContain("⏱ 2s");
+
+    expect(getEntries).toHaveBeenCalledTimes(callsAfterSetup);
+    expectDefined(handlers.get("session_shutdown"), "session_shutdown handler should be registered")({ type: "session_shutdown" }, ctx);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("pi-coder-theme editor refreshes session usage when an assistant message ends", async () => {
+  const originalHome = process.env.HOME;
+  const homeDir = await mkdtemp(join(tmpdir(), "pi-coder-theme-message-end-test-"));
+  process.env.HOME = homeDir;
+
+  try {
+    const { pi, handlers } = createPiStub(() => "medium");
+    piCoderThemeEditorExtension(pi);
+
+    const entries: Array<Record<string, unknown>> = [];
+    const sessionManager = {
+      getEntries() {
+        return entries;
+      },
+      getLeafId() {
+        return entries.length > 0 ? "assistant-usage" : undefined;
+      },
+      getSessionName() {
+        return undefined;
+      },
+    };
+
+    let renderRequests = 0;
+    let editorFactory:
+      | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
+      | undefined;
+    const ctx = {
+      hasUI: true,
+      cwd: "/tmp",
+      model: { id: "claude-sonnet-4-20250514", contextWindow: 200000, reasoning: true },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager,
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        theme: createThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setWorkingVisible() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext;
+
+    expectDefined(handlers.get("session_start"), "session_start handler should be registered")({ type: "session_start", reason: "startup" }, ctx);
+    const editor = expectDefined(editorFactory, "editor factory should be registered")(
+      { requestRender() { renderRequests += 1; }, terminal: { rows: 24 } },
+      createThemeStub(),
+      { matches: () => false },
+    );
+
+    await flushStatusDataRefresh();
+    expect(stripAnsi(editor.render(200).join("\n"))).not.toContain("↑1.2k");
+
+    entries.push({
+      type: "message",
+      id: "assistant-usage",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      message: {
+        role: "assistant",
+        content: [],
+        usage: {
+          input: 1200,
+          output: 800,
+          cost: { total: 0.0123 },
+        },
+      },
+    });
+
+    expectDefined(handlers.get("message_end"), "message_end handler should be registered")(
+      { type: "message_end", message: { role: "assistant", content: [], usage: { input: 1200, output: 800, cost: { total: 0.0123 } } } },
+      ctx,
+    );
+    await flushStatusDataRefresh();
+
+    const rendered = stripAnsi(editor.render(200).join("\n"));
+    expect(rendered).toContain("↑1k ↓800");
+    expect(rendered).toContain("$0.012");
+    expect(renderRequests).toBeGreaterThan(0);
+  } finally {
+    process.env.HOME = originalHome;
+    await rm(homeDir, { recursive: true, force: true });
   }
 });
 
@@ -1206,6 +1388,53 @@ test("pi-coder-theme editor ignores malformed Goal-Driven worker status events",
   expect(editor.render(200).join("\n")).not.toContain("sub");
 });
 
+test("pi-coder-theme editor shows active elapsed timer after the first status tick", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-05-21T00:00:00.000Z"));
+
+  try {
+    const { pi, handlers } = createPiStub(() => "medium");
+    piCoderThemeEditorExtension(pi);
+
+    let editorFactory:
+      | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
+      | undefined;
+
+    const ctx = {
+      hasUI: true,
+      cwd: process.cwd(),
+      model: { id: "claude-sonnet-4-20250514", contextWindow: 200000, reasoning: true },
+      modelRegistry: { isUsingOAuth: () => false },
+      sessionManager: createSessionManager(),
+      getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+      ui: {
+        theme: createTaggedThemeStub(),
+        setEditorComponent(factory: typeof editorFactory) {
+          editorFactory = factory;
+        },
+        setWorkingIndicator() {},
+        setWorkingMessage() {},
+        setFooter() {},
+      },
+    } as unknown as ExtensionContext;
+
+    const sessionStart = expectDefined(handlers.get("session_start"), "session_start handler should be registered");
+    sessionStart({ type: "session_start", reason: "startup" }, ctx);
+
+    const createEditor = expectDefined(editorFactory, "editor factory should be registered");
+    const editor = createEditor({ requestRender() {}, terminal: { rows: 24 } }, createTaggedThemeStub(), { matches: () => false });
+    const beforeAgentStart = expectDefined(handlers.get("before_agent_start"), "before_agent_start handler should be registered");
+    beforeAgentStart({ type: "before_agent_start" }, ctx);
+
+    vi.advanceTimersByTime(1_000);
+
+    expect(editor.render(160).join("\n")).toContain("[accent]⏱");
+    expect(editor.render(160).join("\n")).toContain("[accent]1s");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("pi-coder-theme editor applies the theme text color to typed input", () => {
   const { pi, handlers } = createPiStub(() => "medium");
 
@@ -1303,7 +1532,7 @@ test("pi-coder-theme editor hides token usage disabled in config", async () => {
   await rm(homeDir, { recursive: true, force: true });
 });
 
-test("pi-coder-theme editor uses latest context and cost after reload", () => {
+test("pi-coder-theme editor uses latest context and cost after reload", async () => {
   const { pi, handlers } = createPiStub(() => "high");
 
   piCoderThemeEditorExtension(pi);
@@ -1345,9 +1574,11 @@ test("pi-coder-theme editor uses latest context and cost after reload", () => {
     { matches: () => false },
   );
 
+  await flushStatusDataRefresh();
   expect(editor.render(100).join("\n")).toMatch(/12%\/272k · \$1\.23 sub/);
 
   sessionStart({ type: "session_start", reason: "reload" }, createCtx(72, 16.37));
+  await flushStatusDataRefresh();
 
   expect(editor.render(100).join("\n")).toMatch(/72%\/272k · \$16\.37 sub/);
 });

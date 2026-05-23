@@ -18,7 +18,9 @@ type ThemeStub = {
 type PiCoderThemeEditorLike = {
   handleInput(data: string): void;
   getText(): string;
+  setText(text: string): void;
   render(width: number): string[];
+  setAutocompleteProvider(provider: unknown): void;
   onSubmit?: (text: string) => void;
 };
 
@@ -68,7 +70,7 @@ function pickPaletteItem(item: CommandPaletteItem, key: "tab" | "enter"): Comman
 function createPiCoderThemeEditor(
   paletteResult: CommandPaletteResult,
   entries: SessionEntry[] = [],
-  options: { sessionDir?: string; sessionFile?: string } = {},
+  options: { sessionDir?: string; sessionFile?: string; requestRender?: () => void } = {},
 ): PiCoderThemeEditorLike {
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
   const pi = {
@@ -123,15 +125,83 @@ function createPiCoderThemeEditor(
 
   expect(editorFactory).toBeDefined();
   return editorFactory!(
-    { requestRender() {}, terminal: { rows: 24 } },
+    { requestRender: options.requestRender ?? (() => {}), terminal: { rows: 24 } },
     createThemeStub(),
     {
       matches(data: string, action: string) {
-        return matchesKey(data, "up") && action === "tui.editor.cursorUp";
+        return (matchesKey(data, "up") && action === "tui.editor.cursorUp") || (matchesKey(data, "tab") && action === "tui.input.tab");
       },
     },
   );
 }
+
+test("editor requests repaint for cursor movement inputs that do not change text", () => {
+  let renderRequests = 0;
+  const editor = createPiCoderThemeEditor(
+    { command: "compact", action: "insert" },
+    [],
+    { requestRender: () => { renderRequests += 1; } },
+  );
+
+  editor.handleInput("a");
+  editor.handleInput("b");
+  renderRequests = 0;
+
+  editor.handleInput("\x02");
+
+  expect(editor.getText()).toBe("ab");
+  expect(renderRequests).toBe(1);
+});
+
+test("editor schedules follow-up repaints for inputs that may update text asynchronously", () => {
+  vi.useFakeTimers();
+  try {
+    let renderRequests = 0;
+    const editor = createPiCoderThemeEditor(
+      { command: "compact", action: "insert" },
+      [],
+      { requestRender: () => { renderRequests += 1; } },
+    );
+
+    editor.handleInput("\x16");
+
+    expect(renderRequests).toBe(1);
+    vi.advanceTimersByTime(600);
+    expect(renderRequests).toBeGreaterThanOrEqual(4);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("async autocomplete results request a fixed editor repaint", async () => {
+  let renderRequests = 0;
+  let resolveSuggestions: ((value: unknown) => void) | undefined;
+  const editor = createPiCoderThemeEditor(
+    { command: "compact", action: "insert" },
+    [],
+    { requestRender: () => { renderRequests += 1; } },
+  );
+  editor.setAutocompleteProvider({
+    getSuggestions: vi.fn(() => new Promise((resolve) => { resolveSuggestions = resolve; })),
+    shouldTriggerFileCompletion: () => true,
+  });
+  editor.setText("@docs/plans/");
+
+  editor.handleInput("\t");
+  await Promise.resolve();
+  renderRequests = 0;
+  resolveSuggestions?.({
+    prefix: "@docs/plans/",
+    items: [
+      { value: "@docs/plans/a.md", label: "a.md" },
+      { value: "@docs/plans/b.md", label: "b.md" },
+    ],
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  expect(renderRequests).toBeGreaterThan(0);
+});
 
 test("command palette renders multiline descriptions as one terminal row", () => {
   const overlay = createOverlay([
@@ -180,7 +250,12 @@ test("submitting a command from the palette matches native slash completion", as
 });
 
 test("inserting a command from the palette leaves it editable without submitting", async () => {
-  const editor = createPiCoderThemeEditor({ command: "compact", action: "insert" });
+  let renderRequests = 0;
+  const editor = createPiCoderThemeEditor(
+    { command: "compact", action: "insert" },
+    [],
+    { requestRender: () => { renderRequests += 1; } },
+  );
   const onSubmit = vi.fn();
   editor.onSubmit = onSubmit;
 
@@ -189,6 +264,7 @@ test("inserting a command from the palette leaves it editable without submitting
 
   expect(onSubmit).not.toHaveBeenCalled();
   expect(editor.getText()).toBe("/compact ");
+  expect(renderRequests).toBeGreaterThan(0);
 });
 
 test("pi-coder-theme editor restores previous user messages into input history", () => {
@@ -250,7 +326,7 @@ test("pi-coder-theme editor restores input history when starting an empty new se
   }
 });
 
-test("pi-coder-theme editor shows compact context and token usage", () => {
+test("pi-coder-theme editor shows compact context and token usage", async () => {
   const originalHome = process.env.HOME;
   const homeDir = mkdtempSync(`${tmpdir()}/pi-coder-theme-command-test-`);
   process.env.HOME = homeDir;
@@ -273,6 +349,7 @@ test("pi-coder-theme editor shows compact context and token usage", () => {
       } as SessionEntry,
     ]);
 
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const rendered = editor.render(100).map(stripAnsi).join("\n");
 
     expect(rendered).toContain("12%/200k");

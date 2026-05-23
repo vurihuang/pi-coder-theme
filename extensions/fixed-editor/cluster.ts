@@ -6,6 +6,7 @@ export interface FixedEditorClusterInput {
   width: number;
   terminalRows: number;
   statusLines?: string[];
+  widgetLines?: string[];
   topLines?: string[];
   editorLines: string[];
   secondaryLines?: string[];
@@ -79,6 +80,7 @@ export function renderFixedEditorCluster(input: FixedEditorClusterInput): FixedE
   const maxRows = Math.max(1, input.terminalRows - 1);
 
   const statusLines = normalizeLines(input.statusLines, width);
+  const widgetLines = normalizeLines(input.widgetLines, width);
   const topLines = normalizeLines(input.topLines, width);
   const editorSource = normalizeLines(input.editorLines, width);
   const secondaryLines = normalizeLines(input.secondaryLines, width);
@@ -97,6 +99,9 @@ export function renderFixedEditorCluster(input: FixedEditorClusterInput): FixedE
   const lastPrompt = takeTail(lastPromptLines, remaining);
   remaining -= lastPrompt.length;
 
+  const widget = takeTail(widgetLines, remaining);
+  remaining -= widget.length;
+
   const status = takeTail(statusLines, remaining);
   remaining -= status.length;
 
@@ -104,6 +109,7 @@ export function renderFixedEditorCluster(input: FixedEditorClusterInput): FixedE
 
   return extractCursor([
     ...status,
+    ...widget,
     ...top,
     ...editorLines,
     ...secondary,
