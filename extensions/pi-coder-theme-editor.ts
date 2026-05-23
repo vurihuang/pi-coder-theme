@@ -750,12 +750,12 @@ type EditorRenderRequestTracker = {
   requested: boolean;
 };
 
-function wrapEditorTui(tui: any, markEditorInput: () => void, tracker?: EditorRenderRequestTracker): any {
+function wrapEditorTui(tui: any, invalidateEditorBody: () => void, tracker?: EditorRenderRequestTracker): any {
   return Object.create(tui, {
     requestRender: {
       configurable: true,
       value(force?: boolean) {
-        markEditorInput();
+        invalidateEditorBody();
         if (tracker?.handlingInput) tracker.requested = true;
         return tui.requestRender?.(force);
       },
@@ -767,7 +767,7 @@ class PiCoderThemeEditor extends CustomEditor {
   private readonly renderRequestTracker: EditorRenderRequestTracker;
   private bodySnapshot: { innerWidth: number; editorLines: string[]; popupLines: string[] } | undefined;
   private bodyDirty = true;
-  private asyncInputRenderTimers: Array<ReturnType<typeof setTimeout>> = [];
+  private asyncInputRenderTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     private readonly baseTui: any,
@@ -776,11 +776,11 @@ class PiCoderThemeEditor extends CustomEditor {
     private readonly getCtx: () => ExtensionContext,
     private readonly getStatusLayout: (width: number) => EditorStatusLayout,
     private readonly clearCompletedElapsedTime: () => void,
-    private readonly markEditorInput: () => void,
+    private readonly invalidateEditorBodySnapshot: () => void,
     private readonly openCommandPalette: (initialQuery: string | undefined, onSelect: (result: CommandPaletteResult) => void) => void,
   ) {
     const renderRequestTracker: EditorRenderRequestTracker = { handlingInput: false, requested: false };
-    super(wrapEditorTui(baseTui, markEditorInput, renderRequestTracker), renderTheme, keybindings, { paddingX: 1 });
+    super(wrapEditorTui(baseTui, invalidateEditorBodySnapshot, renderRequestTracker), renderTheme, keybindings, { paddingX: 1 });
     this.renderRequestTracker = renderRequestTracker;
   }
 
@@ -789,7 +789,7 @@ class PiCoderThemeEditor extends CustomEditor {
   }
 
   private requestEditorRender(force?: boolean): void {
-    this.markEditorInput();
+    this.invalidateEditorBodySnapshot();
     this.baseTui.requestRender?.(force);
   }
 
@@ -799,7 +799,7 @@ class PiCoderThemeEditor extends CustomEditor {
 
   handleInput(data: string): void {
     if (data === "/" && this.getText().trim() === "") {
-      this.markEditorInput();
+      this.invalidateEditorBodySnapshot();
       this.openCommandPalette(undefined, (result) => {
         if (result.action === "insert") {
           this.insertCommand(result.command);
@@ -821,20 +821,18 @@ class PiCoderThemeEditor extends CustomEditor {
     if (this.getText() !== before) {
       this.clearCompletedElapsedTime();
     } else {
-      this.scheduleAsyncInputRenders();
+      this.scheduleAsyncInputRender();
     }
     if (!this.renderRequestTracker.requested) this.requestEditorRender();
   }
 
-  private scheduleAsyncInputRenders(): void {
-    for (const timer of this.asyncInputRenderTimers) clearTimeout(timer);
-    this.asyncInputRenderTimers = [80, 250, 600].map((delay) => {
-      const timer = setTimeout(() => {
-        this.requestEditorRender();
-      }, delay);
-      timer.unref?.();
-      return timer;
-    });
+  private scheduleAsyncInputRender(): void {
+    if (this.asyncInputRenderTimer) clearTimeout(this.asyncInputRenderTimer);
+    this.asyncInputRenderTimer = setTimeout(() => {
+      this.asyncInputRenderTimer = undefined;
+      this.requestEditorRender();
+    }, 80);
+    this.asyncInputRenderTimer.unref?.();
   }
 
   private insertCommand(command: string): void {
@@ -1053,9 +1051,8 @@ export default function (pi: ExtensionAPI) {
     statusLayoutCache.invalidate();
     statusScheduler?.forceRefresh(reason);
   };
-  const markEditorInput = () => {
+  const invalidateEditorBody = () => {
     activeEditor?.invalidateEditorBody();
-    statusScheduler?.markEditorInput();
   };
   statusScheduler = new StatusRenderScheduler({
     onRender: () => requestRender(),
@@ -1257,7 +1254,7 @@ export default function (pi: ExtensionAPI) {
             statusRight: buildGitChangesLabel(git, fg),
           };
         });
-        const editor = new PiCoderThemeEditor(tui, theme, keybindings, () => activeCtx ?? ctx, getStatusLayout, clearCompletedElapsedTime, markEditorInput, openCommandPalette);
+        const editor = new PiCoderThemeEditor(tui, theme, keybindings, () => activeCtx ?? ctx, getStatusLayout, clearCompletedElapsedTime, invalidateEditorBody, openCommandPalette);
         activeEditor = editor;
         seedEditorHistory(editor, ctx);
         return editor;

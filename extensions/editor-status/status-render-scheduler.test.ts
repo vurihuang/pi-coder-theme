@@ -23,21 +23,14 @@ test("coalesces multiple editor/status invalidations into one render callback", 
   }
 });
 
-test("editor input records timing without scheduling a duplicate render", () => {
+test("status invalidations flush after the normal debounce window", () => {
   vi.useFakeTimers();
   try {
-    let now = 1_000;
     const onRender = vi.fn();
-    const scheduler = new StatusRenderScheduler({ onRender, debounceMs: 40, inputDeferMs: 120, now: () => now });
+    const scheduler = new StatusRenderScheduler({ onRender, debounceMs: 40 });
 
-    scheduler.markEditorInput();
-    vi.advanceTimersByTime(200);
-
-    expect(onRender).not.toHaveBeenCalled();
-
-    now += 20;
     scheduler.markStatusDirty();
-    vi.advanceTimersByTime(99);
+    vi.advanceTimersByTime(39);
     expect(onRender).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(1);

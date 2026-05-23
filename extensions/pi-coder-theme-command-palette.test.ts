@@ -157,7 +157,7 @@ test("editor requests repaint for cursor movement inputs that do not change text
   expect(renderRequests).toBe(1);
 });
 
-test("editor schedules follow-up repaints for inputs that may update text asynchronously", () => {
+test("editor avoids late repeated follow-up repaints for async-like inputs", () => {
   vi.useFakeTimers();
   try {
     let renderRequests = 0;
@@ -170,8 +170,34 @@ test("editor schedules follow-up repaints for inputs that may update text asynch
     editor.handleInput("\x16");
 
     expect(renderRequests).toBe(1);
-    vi.advanceTimersByTime(600);
-    expect(renderRequests).toBeGreaterThanOrEqual(4);
+    vi.advanceTimersByTime(80);
+    expect(renderRequests).toBe(3);
+    vi.advanceTimersByTime(520);
+    expect(renderRequests).toBe(3);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("editor replaces pending follow-up repaints for repeated async-like inputs", () => {
+  vi.useFakeTimers();
+  try {
+    let renderRequests = 0;
+    const editor = createPiCoderThemeEditor(
+      { command: "compact", action: "insert" },
+      [],
+      { requestRender: () => { renderRequests += 1; } },
+    );
+
+    editor.handleInput("\x16");
+    vi.advanceTimersByTime(40);
+    editor.handleInput("\x16");
+
+    expect(renderRequests).toBe(2);
+    vi.advanceTimersByTime(80);
+    expect(renderRequests).toBe(4);
+    vi.advanceTimersByTime(520);
+    expect(renderRequests).toBe(4);
   } finally {
     vi.useRealTimers();
   }
