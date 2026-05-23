@@ -3,15 +3,48 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { retainThinkingStepsPatch, resetCompactLineTracker } from "./internal-patch.js";
 import { clearActiveThinkingState, setActiveThinkingState, setThinkingTheme } from "./state.js";
 
-type AssistantMessageEvent = {
-  message?: {
-    role?: string;
-    content?: Array<{ type?: string }>;
+type AssistantMessageEventType =
+  | "thinking_start"
+  | "thinking_delta"
+  | "thinking_end"
+  | "text_start"
+  | "text_delta"
+  | "text_end"
+  | "toolcall_start"
+  | "toolcall_delta"
+  | "toolcall_end";
+
+type AssistantMessageEventPayload = {
+  assistantMessageEvent?: {
+    type?: unknown;
+    contentIndex?: unknown;
   };
 };
 
-function hasThinkingContent(event: AssistantMessageEvent): boolean {
-  return event.message?.role === "assistant" && Array.isArray(event.message.content) && event.message.content.some((content) => content.type === "thinking");
+const thinkingEventTypes = new Set<AssistantMessageEventType>(["thinking_start", "thinking_delta"]);
+const thinkingClearingEventTypes = new Set<AssistantMessageEventType>(["thinking_end", "text_start", "text_delta", "text_end", "toolcall_start", "toolcall_delta", "toolcall_end"]);
+
+function normalizeAssistantMessageEvent(event: unknown): { type: AssistantMessageEventType; contentIndex?: number } | undefined {
+  const assistantMessageEvent = (event as AssistantMessageEventPayload | undefined)?.assistantMessageEvent;
+  if (!assistantMessageEvent || typeof assistantMessageEvent.type !== "string") return undefined;
+  if (!thinkingEventTypes.has(assistantMessageEvent.type as AssistantMessageEventType) && !thinkingClearingEventTypes.has(assistantMessageEvent.type as AssistantMessageEventType)) return undefined;
+
+  return {
+    type: assistantMessageEvent.type as AssistantMessageEventType,
+    contentIndex: typeof assistantMessageEvent.contentIndex === "number" ? assistantMessageEvent.contentIndex : undefined,
+  };
+}
+
+export function applyThinkingMessageUpdate(event: unknown): void {
+  const normalized = normalizeAssistantMessageEvent(event);
+  if (!normalized) return;
+
+  if (thinkingEventTypes.has(normalized.type)) {
+    setActiveThinkingState({ active: true, contentIndex: normalized.contentIndex });
+    return;
+  }
+
+  clearActiveThinkingState();
 }
 
 function withActiveUI(ctx: ExtensionContext, callback: (ui: ExtensionContext["ui"]) => void): boolean {
@@ -52,12 +85,7 @@ export default function piCoderThemeThinkingSteps(pi: ExtensionAPI) {
 
   pi.on("message_update", (event, ctx) => {
     if (degraded || !withActiveUI(ctx, () => undefined)) return;
-
-    if (hasThinkingContent(event as AssistantMessageEvent)) {
-      const contentIndex = (event as AssistantMessageEvent).message?.content?.findIndex((content) => content.type === "thinking");
-      setActiveThinkingState({ active: true, contentIndex: contentIndex === -1 ? undefined : contentIndex });
-      requestRender(ctx);
-    }
+    applyThinkingMessageUpdate(event);
   });
 
   pi.on("agent_end", (_event, ctx) => {

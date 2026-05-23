@@ -38,15 +38,7 @@ type AssistantMessageComponentPrototype = {
 
 type PatchableComponent = { prototype: AssistantMessageComponentPrototype };
 
-// Module-level tracker: max lines seen during the current streaming turn.
-// Prevents the rendered output from shrinking when thinking step content
-// changes, which would leave stale lines on screen due to the TUI
-// differential renderer not clearing them.
-let _maxRenderedLines = 0;
-
-export function resetCompactLineTracker(): void {
-  _maxRenderedLines = 0;
-}
+export function resetCompactLineTracker(): void {}
 
 class ThinkingStepsComponent {
   constructor(
@@ -60,7 +52,7 @@ class ThinkingStepsComponent {
   render(width: number): string[] {
     const steps = deriveThinkingSteps(this.blocks);
     const active = getActiveThinkingState();
-    const lines = renderThinkingSteps({
+    return renderThinkingSteps({
       mode: this.mode,
       width,
       steps,
@@ -68,19 +60,6 @@ class ThinkingStepsComponent {
       activeStepId: active.contentIndex === undefined ? undefined : steps.find((step) => step.contentIndex === active.contentIndex)?.id,
       isActive: active.active,
     });
-
-    // Pad output to the max line count ever produced during this turn.
-    // This prevents the TUI differential renderer from leaving stale lines
-    // on screen when the rendered output shrinks (e.g., when thinking step
-    // count changes during streaming).
-    if (lines.length > _maxRenderedLines) {
-      _maxRenderedLines = lines.length;
-    }
-    while (lines.length < _maxRenderedLines) {
-      lines.push(" ".repeat(width));
-    }
-
-    return lines;
   }
 }
 
