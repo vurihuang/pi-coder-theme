@@ -38,6 +38,16 @@ type AssistantMessageComponentPrototype = {
 
 type PatchableComponent = { prototype: AssistantMessageComponentPrototype };
 
+// Module-level tracker: max lines seen during the current streaming turn.
+// Prevents the rendered output from shrinking when thinking step content
+// changes, which would leave stale lines on screen due to the TUI
+// differential renderer not clearing them.
+let _maxRenderedLines = 0;
+
+export function resetCompactLineTracker(): void {
+  _maxRenderedLines = 0;
+}
+
 class ThinkingStepsComponent {
   constructor(
     private readonly blocks: ThinkingSourceBlock[],
@@ -50,7 +60,7 @@ class ThinkingStepsComponent {
   render(width: number): string[] {
     const steps = deriveThinkingSteps(this.blocks);
     const active = getActiveThinkingState();
-    return renderThinkingSteps({
+    const lines = renderThinkingSteps({
       mode: this.mode,
       width,
       steps,
@@ -58,6 +68,19 @@ class ThinkingStepsComponent {
       activeStepId: active.contentIndex === undefined ? undefined : steps.find((step) => step.contentIndex === active.contentIndex)?.id,
       isActive: active.active,
     });
+
+    // Pad output to the max line count ever produced during this turn.
+    // This prevents the TUI differential renderer from leaving stale lines
+    // on screen when the rendered output shrinks (e.g., when thinking step
+    // count changes during streaming).
+    if (lines.length > _maxRenderedLines) {
+      _maxRenderedLines = lines.length;
+    }
+    while (lines.length < _maxRenderedLines) {
+      lines.push(" ".repeat(width));
+    }
+
+    return lines;
   }
 }
 
@@ -142,7 +165,8 @@ function renderStructuredContent(instance: AssistantMessageComponentPrototype, m
       const label = theme.italic ? theme.italic(theme.fg("thinkingText", instance.hiddenThinkingLabel)) : theme.fg("thinkingText", instance.hiddenThinkingLabel);
       container.addChild(new Text(label, 1, 0));
     } else {
-      const mode = message.stopReason ? "summary" : "compact";
+      const active = getActiveThinkingState();
+      const mode = active.active ? "compact" : "summary";
       container.addChild(new ThinkingStepsComponent([collectThinkingBlock(content, index)], theme, mode));
     }
 

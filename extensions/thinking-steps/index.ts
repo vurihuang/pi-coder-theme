@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { retainThinkingStepsPatch } from "./internal-patch.js";
+import { retainThinkingStepsPatch, resetCompactLineTracker } from "./internal-patch.js";
 import { clearActiveThinkingState, setActiveThinkingState, setThinkingTheme } from "./state.js";
 
 type AssistantMessageEvent = {
@@ -62,6 +62,7 @@ export default function piCoderThemeThinkingSteps(pi: ExtensionAPI) {
 
   pi.on("agent_end", (_event, ctx) => {
     clearActiveThinkingState();
+    resetCompactLineTracker();
     if (!degraded) requestRender(ctx);
   });
 
@@ -70,6 +71,7 @@ export default function piCoderThemeThinkingSteps(pi: ExtensionAPI) {
     releasePatch = undefined;
     degraded = false;
     clearActiveThinkingState();
+    resetCompactLineTracker();
     setThinkingTheme(undefined);
   });
 }

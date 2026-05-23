@@ -44,7 +44,9 @@ function firstMeaningfulLine(text: string): string {
 
 function firstSentence(text: string): string {
   const normalized = collapseWhitespace(text);
-  const match = normalized.match(/^(.{1,120}?)(?:[.!?](?:\s|$)|$)/);
+  // Match sentence boundaries for both Western (.!?) and CJK (。！？) punctuation.
+  // CJK fullwidth marks are standalone terminators (no trailing space required).
+  const match = normalized.match(/^(.{1,120}?)(?:[.!?](?:\s|$)|[。！？])/);
   return match?.[1]?.trim() ?? normalized;
 }
 
