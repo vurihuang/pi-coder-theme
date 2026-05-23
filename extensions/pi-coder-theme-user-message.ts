@@ -126,7 +126,6 @@ export default function (pi: ExtensionAPI) {
   let activeThinkingLevel = "off";
 
   const getTheme = () => activeTheme;
-  const getThinkingLevel = () => activeThinkingLevel;
   const readThinkingLevel = () => {
     try {
       return pi.getThinkingLevel();
@@ -134,6 +133,7 @@ export default function (pi: ExtensionAPI) {
       return activeThinkingLevel;
     }
   };
+  const getThinkingLevel = () => readThinkingLevel();
 
   patchUserMessageRender(getTheme, getThinkingLevel);
 

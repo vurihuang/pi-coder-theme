@@ -1244,7 +1244,7 @@ export default function (pi: ExtensionAPI) {
             topLeft: buildUsageLabel(usageParts),
             topRight: buildModelLabel(
               Math.max(8, Math.floor(innerWidth * 0.48)),
-              activeThinkingLevel,
+              readThinkingLevel(),
               getExtensionStatusLabel(),
               (maxWidth) => model ? compactModelReference(model, maxWidth) : "model unknown",
               fg,
