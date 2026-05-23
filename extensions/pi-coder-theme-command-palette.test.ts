@@ -59,9 +59,13 @@ function createPaletteKeybindings() {
   };
 }
 
-function pickPaletteItem(item: CommandPaletteItem, key: "tab" | "enter"): CommandPaletteResult | null | undefined {
+function pickPaletteItem(
+  item: CommandPaletteItem,
+  key: "tab" | "enter" | "\r",
+  keybindings: { matches(data: string, action: string): boolean } = createPaletteKeybindings(),
+): CommandPaletteResult | null | undefined {
   let result: CommandPaletteResult | null | undefined;
-  new CommandPaletteOverlay([item], "", { requestRender() {} } as never, createThemeStub() as never, createPaletteKeybindings() as never, (value) => {
+  new CommandPaletteOverlay([item], "", { requestRender() {} } as never, createThemeStub() as never, keybindings as never, (value) => {
     result = value;
   }).handleInput(key);
   return result;
@@ -220,12 +224,22 @@ test("command palette renders multiline descriptions as one terminal row", () =>
 
 test.each([
   [{ name: "settings", source: "builtin" }, "submit"],
-  [{ name: "btw:new", source: "extension" }, "submit"],
+  [{ name: "btw:new", source: "extension" }, "insert"],
   [{ name: "skill:pi-subagents", source: "skill" }, "insert"],
   [{ name: "component", source: "prompt" }, "insert"],
 ] satisfies Array<[CommandPaletteItem, CommandPaletteResult["action"]]>)
 ("command palette enter action follows command source for %s", (item, expectedAction) => {
   expect(pickPaletteItem(item, "enter")).toEqual({ command: item.name, action: expectedAction });
+});
+
+test("command palette enter also confirms through the native input submit binding", () => {
+  const keybindings = {
+    matches(data: string, action: string) {
+      return data === "\r" && action === "tui.input.submit";
+    },
+  };
+
+  expect(pickPaletteItem({ name: "goal", source: "extension" }, "\r", keybindings)).toEqual({ command: "goal", action: "insert" });
 });
 
 test.each([
@@ -237,7 +251,7 @@ test.each([
   expect(pickPaletteItem(item, "tab")).toEqual({ command: item.name, action: "insert" });
 });
 
-test("submitting a command from the palette matches native slash completion", async () => {
+test("submitting a command from the palette uses the native editor submit path", async () => {
   const editor = createPiCoderThemeEditor({ command: "compact", action: "submit" });
   const onSubmit = vi.fn();
   editor.onSubmit = onSubmit;
@@ -247,6 +261,18 @@ test("submitting a command from the palette matches native slash completion", as
 
   expect(onSubmit).toHaveBeenCalledWith("/compact");
   expect(editor.getText()).toBe("");
+});
+
+test("pressing enter on an extension command from the palette inserts it for arguments", async () => {
+  const editor = createPiCoderThemeEditor({ command: "goal", action: "insert" });
+  const onSubmit = vi.fn();
+  editor.onSubmit = onSubmit;
+
+  editor.handleInput("/");
+  await Promise.resolve();
+
+  expect(onSubmit).not.toHaveBeenCalled();
+  expect(editor.getText()).toBe("/goal ");
 });
 
 test("inserting a command from the palette leaves it editable without submitting", async () => {

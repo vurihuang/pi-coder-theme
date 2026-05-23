@@ -856,13 +856,7 @@ class PiCoderThemeEditor extends CustomEditor {
     this.clearCompletedElapsedTime();
     this.setText(`/${command}`);
     this.requestEditorRender();
-    const submitValue = (this as unknown as { submitValue?: () => void }).submitValue;
-    if (submitValue) {
-      submitValue.call(this);
-      return;
-    }
-
-    this.onSubmit?.(`/${command}`);
+    (this as unknown as { submitValue(): void }).submitValue();
   }
 
   render(width: number): string[] {

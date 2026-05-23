@@ -112,7 +112,7 @@ export class CommandPaletteOverlay implements Component {
       return;
     }
 
-    if (this.keybindings.matches(data, "tui.select.confirm")) {
+    if (this.keybindings.matches(data, "tui.select.confirm") || this.keybindings.matches(data, "tui.input.submit") || matchesKey(data, Key.enter)) {
       const selected = filtered[this.selectedIndex];
       this.done(selected ? { command: selected.name, action: getDefaultCommandAction(selected) } : null);
       return;
@@ -222,7 +222,7 @@ export class CommandPaletteOverlay implements Component {
 }
 
 function getDefaultCommandAction(item: CommandPaletteItem): CommandPaletteResult["action"] {
-  return item.source === "skill" || item.source === "prompt" ? "insert" : "submit";
+  return item.source === "builtin" ? "submit" : "insert";
 }
 
 function dedupeItems(items: CommandPaletteItem[]): CommandPaletteItem[] {
