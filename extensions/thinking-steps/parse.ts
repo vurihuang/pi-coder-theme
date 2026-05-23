@@ -2,6 +2,7 @@ import type { DerivedThinkingStep, ThinkingSemanticRole, ThinkingSourceBlock } f
 
 const LIST_ITEM_RE = /^\s*(?:[-*+]\s+|\d+[.)]\s+|[a-z][.)]\s+)/i;
 const HEADING_RE = /^\s{0,3}#{1,6}\s+/;
+const LEADING_THINKING_LABEL_RE = /^thinking\s*[:：-]\s*/i;
 const LEADING_SUMMARY_PHRASE_RE = /^(?:i\s+(?:need|should|want)\s+to|need\s+to|i(?:'m| am)\s+going\s+to|i(?:'ll| will)|let\s+me|let'?s|first,?\s+|next,?\s+|then,?\s+|now,?\s+|okay,?\s+)/i;
 
 function normalizeNewlines(text: string): string {
@@ -21,6 +22,11 @@ function stripMarkdown(text: string): string {
     .replace(/(^|[^\w/.-])\*(?=\S)([\s\S]*?\S)\*(?=[^\w/.-]|$)/g, "$1$2")
     .replace(/(^|[^\w/.-])_(?=\S)([\s\S]*?\S)_(?=[^\w/.-]|$)/g, "$1$2")
     .trim();
+}
+
+function stripLeadingThinkingLabel(text: string): string {
+  const stripped = text.replace(LEADING_THINKING_LABEL_RE, "").trim();
+  return stripped || text.trim();
 }
 
 function stripLeadingSummaryPhrase(text: string): string {
@@ -161,7 +167,7 @@ function priorityForRole(role: ThinkingSemanticRole): number {
 
 function summarizeStepText(text: string): string {
   const line = firstMeaningfulLine(text);
-  const summary = stripLeadingSummaryPhrase(stripMarkdown(firstSentence(line)));
+  const summary = stripLeadingSummaryPhrase(stripLeadingThinkingLabel(stripMarkdown(firstSentence(line))));
   return ensureSentence(summary);
 }
 

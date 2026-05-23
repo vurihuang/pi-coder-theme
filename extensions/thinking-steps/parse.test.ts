@@ -35,8 +35,15 @@ test("normalizes markdown only in summaries", () => {
   expect(step?.body).toBe("**Plan** `render` changes");
 });
 
+test("strips generated thinking labels from summaries", () => {
+  const [step] = deriveThinkingSteps([{ contentIndex: 3, text: "**Thinking:** Investigating configuration issues." }]);
+
+  expect(step?.summary).toBe("Investigating configuration issues.");
+  expect(step?.body).toBe("**Thinking:** Investigating configuration issues.");
+});
+
 test("redacted empty thinking produces a hidden marker step", () => {
-  const [step] = deriveThinkingSteps([{ contentIndex: 3, text: "", redacted: true }]);
+  const [step] = deriveThinkingSteps([{ contentIndex: 4, text: "", redacted: true }]);
 
   expect(step).toMatchObject({
     summary: "Hidden reasoning.",
