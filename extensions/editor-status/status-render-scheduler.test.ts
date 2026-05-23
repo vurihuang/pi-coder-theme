@@ -2,7 +2,7 @@ import { expect, test, vi } from "vitest";
 
 import { StatusRenderScheduler } from "./status-render-scheduler.js";
 
-test("coalesces multiple status invalidations into one render callback", () => {
+test("coalesces multiple editor/status invalidations into one render callback", () => {
   vi.useFakeTimers();
   try {
     const onRender = vi.fn();
@@ -10,14 +10,14 @@ test("coalesces multiple status invalidations into one render callback", () => {
 
     scheduler.markStatusDirty();
     scheduler.markStatusDirty();
-    scheduler.markWidgetDirty();
+    scheduler.markDirty("editor");
 
     vi.advanceTimersByTime(79);
     expect(onRender).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(1);
     expect(onRender).toHaveBeenCalledTimes(1);
-    expect(onRender).toHaveBeenLastCalledWith(["status", "widget"]);
+    expect(onRender).toHaveBeenLastCalledWith(["status", "editor"]);
   } finally {
     vi.useRealTimers();
   }
@@ -71,10 +71,10 @@ test("forced refresh bypasses normal delay", () => {
     const scheduler = new StatusRenderScheduler({ onRender, debounceMs: 80 });
 
     scheduler.markStatusDirty();
-    scheduler.forceRefresh("widget");
+    scheduler.forceRefresh("editor");
 
     expect(onRender).toHaveBeenCalledTimes(1);
-    expect(onRender).toHaveBeenLastCalledWith(["status", "widget"]);
+    expect(onRender).toHaveBeenLastCalledWith(["status", "editor"]);
   } finally {
     vi.useRealTimers();
   }

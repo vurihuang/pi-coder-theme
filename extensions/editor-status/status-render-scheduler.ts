@@ -1,4 +1,4 @@
-export type StatusRenderDirtyReason = "editor" | "status" | "widget" | "resize" | "overlay" | "selection";
+export type StatusRenderDirtyReason = "editor" | "status";
 
 export interface StatusRenderSchedulerOptions {
   onRender: (reasons: StatusRenderDirtyReason[]) => void;
@@ -29,10 +29,6 @@ export class StatusRenderScheduler {
 
   markStatusDirty(): void {
     this.markDirty("status");
-  }
-
-  markWidgetDirty(): void {
-    this.markDirty("widget");
   }
 
   markDirty(reason: StatusRenderDirtyReason, immediate = false): void {

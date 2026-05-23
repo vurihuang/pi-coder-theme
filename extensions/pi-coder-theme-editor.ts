@@ -1,6 +1,5 @@
-import { copyToClipboard, CustomEditor, type ExtensionAPI, type ExtensionContext, type ThemeColor } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type ExtensionAPI, type ExtensionContext, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { renderFixedEditorCluster } from "./fixed-editor/cluster.js";
 import {
   buildBackgroundWorkerLabel,
   buildCwdLabel,
@@ -12,9 +11,8 @@ import {
   renderStatusRows,
   StatusLayoutCache,
   type EditorStatusLayout,
-} from "./fixed-editor/status-layout.js";
-import { StatusRenderScheduler, type StatusRenderDirtyReason } from "./fixed-editor/status-render-scheduler.js";
-import { TerminalSplitCompositor } from "./fixed-editor/terminal-split.js";
+} from "./editor-status/status-layout.js";
+import { StatusRenderScheduler, type StatusRenderDirtyReason } from "./editor-status/status-render-scheduler.js";
 import { BUILTIN_COMMAND_PALETTE_ITEMS, CommandPaletteOverlay, type CommandPaletteItem, type CommandPaletteResult, stripAnsi } from "./pi-coder-theme-command-palette.js";
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -145,13 +143,6 @@ type FooterData = {
 
 type TuiLike = {
   requestRender(force?: boolean): void;
-  children?: unknown[];
-  terminal?: unknown;
-  getShowHardwareCursor?: () => boolean;
-};
-
-type Renderable = {
-  render(width: number): string[];
 };
 
 type HistoryCapableEditor = {
@@ -938,20 +929,6 @@ class PiCoderThemeEditor extends CustomEditor {
   }
 }
 
-function isRenderable(value: unknown): value is Renderable {
-  return Boolean(value && typeof value === "object" && typeof (value as Renderable).render === "function");
-}
-
-function findContainerWithChild(tui: TuiLike | undefined, child: unknown): { container: Renderable; index: number } | undefined {
-  const children = Array.isArray(tui?.children) ? tui.children : [];
-  const index = children.findIndex((candidate) => Array.isArray((candidate as { children?: unknown[] })?.children)
-    && (candidate as { children: unknown[] }).children.includes(child));
-  if (index === -1) return undefined;
-
-  const container = children[index];
-  return isRenderable(container) ? { container, index } : undefined;
-}
-
 function getCommandPaletteItems(pi: ExtensionAPI): CommandPaletteItem[] {
   const items = [
     ...BUILTIN_COMMAND_PALETTE_ITEMS,
@@ -976,11 +953,6 @@ export default function (pi: ExtensionAPI) {
   let activeTui: TuiLike | undefined;
   let activeEditor: PiCoderThemeEditor | undefined;
   let footerData: FooterData | undefined;
-  let fixedEditorCompositor: TerminalSplitCompositor | undefined;
-  let fixedStatusContainer: Renderable | undefined;
-  let fixedEditorContainer: Renderable | undefined;
-  let fixedWidgetContainerAbove: Renderable | undefined;
-  let fixedWidgetContainerBelow: Renderable | undefined;
   let commandPaletteOpen = false;
   let backgroundWorkerState: BackgroundWorkerState | undefined;
   let isWorking = false;
@@ -991,10 +963,6 @@ export default function (pi: ExtensionAPI) {
   const subagentTiming: SubagentTimingState = { activeRunIds: new Set() };
   const statusLayoutCache = new StatusLayoutCache();
   let statusScheduler: StatusRenderScheduler | undefined;
-  let editorSnapshotDirty = true;
-  let statusContainerSnapshotDirty = true;
-  let widgetSnapshotDirty = true;
-  let secondarySnapshotDirty = true;
   let statusDataSnapshot: StatusDataSnapshot | undefined;
   let statusDataRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   let statusDataRefreshVersion = 0;
@@ -1077,46 +1045,16 @@ export default function (pi: ExtensionAPI) {
     statusDataRefreshTimer.unref?.();
   };
   const getStatusDataSnapshot = (ctx: ExtensionContext): StatusDataSnapshot => statusDataSnapshot ?? fallbackStatusDataSnapshot(ctx);
-  const markEditorSnapshotDirty = (includeEditorBody: boolean) => {
-    editorSnapshotDirty = true;
-    if (includeEditorBody) activeEditor?.invalidateEditorBody();
-  };
-  const markStatusContainerSnapshotDirty = () => {
-    statusContainerSnapshotDirty = true;
-  };
-  const markWidgetSnapshotDirty = () => {
-    widgetSnapshotDirty = true;
-  };
-  const markFullSnapshotsDirty = () => {
-    markEditorSnapshotDirty(true);
-    markStatusContainerSnapshotDirty();
-    markWidgetSnapshotDirty();
-    secondarySnapshotDirty = true;
-  };
-  const markSnapshotDirtyForReason = (reason: StatusRenderDirtyReason) => {
-    if (reason === "editor") markEditorSnapshotDirty(true);
-    if (reason === "status") {
-      markEditorSnapshotDirty(false);
-      markStatusContainerSnapshotDirty();
-    }
-    if (reason === "widget") markWidgetSnapshotDirty();
-    if (reason === "resize" || reason === "overlay") markFullSnapshotsDirty();
-  };
   const invalidateStatus = (reason: StatusRenderDirtyReason = "status") => {
     statusLayoutCache.invalidate();
-    markSnapshotDirtyForReason(reason);
-    fixedEditorCompositor?.invalidateCluster?.(reason);
     statusScheduler?.markDirty(reason);
   };
   const forceStatusRefresh = (reason: StatusRenderDirtyReason = "status") => {
     statusLayoutCache.invalidate();
-    markSnapshotDirtyForReason(reason);
-    fixedEditorCompositor?.invalidateCluster?.(reason);
     statusScheduler?.forceRefresh(reason);
   };
   const markEditorInput = () => {
-    markEditorSnapshotDirty(true);
-    fixedEditorCompositor?.invalidateCluster?.("editor");
+    activeEditor?.invalidateEditorBody();
     statusScheduler?.markEditorInput();
   };
   statusScheduler = new StatusRenderScheduler({
@@ -1128,108 +1066,6 @@ export default function (pi: ExtensionAPI) {
     invalidateStatus("status");
   };
   const getBackgroundWorkerState = () => backgroundWorkerState;
-
-  const teardownFixedEditorCompositor = (resetExtendedKeyboardModes = false) => {
-    fixedEditorCompositor?.dispose({ resetExtendedKeyboardModes });
-    fixedEditorCompositor = undefined;
-    fixedStatusContainer = undefined;
-    fixedEditorContainer = undefined;
-    fixedWidgetContainerAbove = undefined;
-    fixedWidgetContainerBelow = undefined;
-    markFullSnapshotsDirty();
-  };
-
-  const installFixedEditorCompositor = (ctx: ExtensionContext, tui: TuiLike | undefined) => {
-    if (!hasActiveUI(ctx) || !tui?.terminal || typeof (tui.terminal as { write?: unknown }).write !== "function" || !activeEditor) return;
-
-    const editorContainerMatch = findContainerWithChild(tui, activeEditor);
-    if (!editorContainerMatch) return;
-
-    const tuiChildren = Array.isArray(tui.children) ? tui.children : [];
-    const nextEditorContainer = editorContainerMatch.container;
-    const statusContainerCandidate = tuiChildren[editorContainerMatch.index - 2];
-    const nextStatusContainer = isRenderable(statusContainerCandidate) ? statusContainerCandidate : undefined;
-    const aboveWidgetCandidate = tuiChildren[editorContainerMatch.index - 1];
-    const nextWidgetContainerAbove = isRenderable(aboveWidgetCandidate) ? aboveWidgetCandidate : undefined;
-    const belowWidgetCandidate = tuiChildren[editorContainerMatch.index + 1];
-    const nextWidgetContainerBelow = isRenderable(belowWidgetCandidate) ? belowWidgetCandidate : undefined;
-
-    if (
-      fixedEditorCompositor &&
-      fixedEditorContainer === nextEditorContainer &&
-      fixedStatusContainer === nextStatusContainer &&
-      fixedWidgetContainerAbove === nextWidgetContainerAbove &&
-      fixedWidgetContainerBelow === nextWidgetContainerBelow
-    ) {
-      fixedEditorCompositor.requestRepaint();
-      return;
-    }
-
-    teardownFixedEditorCompositor();
-
-    fixedEditorContainer = nextEditorContainer;
-    fixedStatusContainer = nextStatusContainer;
-    fixedWidgetContainerAbove = nextWidgetContainerAbove;
-    fixedWidgetContainerBelow = nextWidgetContainerBelow;
-
-    let statusContainerSnapshot: { width: number; lines: string[] } | undefined;
-    let editorSnapshot: { width: number; lines: string[] } | undefined;
-    let widgetSnapshot: { width: number; lines: string[] } | undefined;
-    let secondarySnapshot: { width: number; lines: string[] } | undefined;
-    let compositor: TerminalSplitCompositor;
-    compositor = new TerminalSplitCompositor({
-      tui,
-      terminal: tui.terminal as ConstructorParameters<typeof TerminalSplitCompositor>[0]["terminal"],
-      getShowHardwareCursor: () => Boolean(tui.getShowHardwareCursor?.()),
-      onCopySelection: (text) => {
-        void copyToClipboard(text).catch(() => {});
-      },
-      onInvalidateCluster: (reason) => {
-        markSnapshotDirtyForReason(reason);
-      },
-      renderCluster: (width, terminalRows) => {
-        if (statusContainerSnapshotDirty || statusContainerSnapshot?.width !== width) {
-          const statusContainerLines = fixedStatusContainer
-            ? compositor.renderHidden(fixedStatusContainer, width).filter((line) => visibleWidth(line) > 0)
-            : [];
-          statusContainerSnapshot = { width, lines: statusContainerLines };
-          statusContainerSnapshotDirty = false;
-        }
-        if (widgetSnapshotDirty || widgetSnapshot?.width !== width) {
-          const aboveWidgetLines = fixedWidgetContainerAbove ? compositor.renderHidden(fixedWidgetContainerAbove, width) : [];
-          widgetSnapshot = { width, lines: aboveWidgetLines };
-          widgetSnapshotDirty = false;
-        }
-        if (editorSnapshotDirty || editorSnapshot?.width !== width) {
-          const editorLines = fixedEditorContainer ? compositor.renderHidden(fixedEditorContainer, width) : [];
-          editorSnapshot = { width, lines: editorLines };
-          editorSnapshotDirty = false;
-        }
-        if (secondarySnapshotDirty || secondarySnapshot?.width !== width) {
-          const belowWidgetLines = fixedWidgetContainerBelow ? compositor.renderHidden(fixedWidgetContainerBelow, width) : [];
-          secondarySnapshot = { width, lines: belowWidgetLines };
-          secondarySnapshotDirty = false;
-        }
-
-        return renderFixedEditorCluster({
-          width,
-          terminalRows,
-          statusLines: statusContainerSnapshot?.lines ?? [],
-          widgetLines: widgetSnapshot?.lines ?? [],
-          editorLines: editorSnapshot?.lines ?? [],
-          secondaryLines: secondarySnapshot?.lines ?? [],
-        });
-      },
-    });
-
-    fixedEditorCompositor = compositor;
-    if (fixedStatusContainer) compositor.hideRenderable(fixedStatusContainer);
-    if (fixedWidgetContainerAbove) compositor.hideRenderable(fixedWidgetContainerAbove);
-    compositor.hideRenderable(fixedEditorContainer);
-    if (fixedWidgetContainerBelow) compositor.hideRenderable(fixedWidgetContainerBelow);
-    compositor.install();
-    tui.requestRender(true);
-  };
 
   const stopWorkingTimer = () => {
     if (!workingTimer) return;
@@ -1271,18 +1107,13 @@ export default function (pi: ExtensionAPI) {
     const ctx = activeCtx;
     if (!hasActiveUI(ctx) || commandPaletteOpen) return;
 
-    const restoreFixedEditor = () => {
+    const restoreEditor = () => {
       commandPaletteOpen = false;
-      if (fixedEditorCompositor) {
-        fixedEditorCompositor.setClusterSuppressed(false);
-      } else {
-        queueMicrotask(() => installFixedEditorCompositor(ctx, activeTui));
-      }
     };
 
     const showPalette = () => {
       if (!hasActiveUI(ctx)) {
-        restoreFixedEditor();
+        restoreEditor();
         return;
       }
 
@@ -1307,25 +1138,19 @@ export default function (pi: ExtensionAPI) {
             },
           },
         ).then((result) => {
-          restoreFixedEditor();
+          restoreEditor();
           if (!result) return;
           onSelect(result);
         }).catch(() => {
-          restoreFixedEditor();
+          restoreEditor();
         });
       } catch {
-        restoreFixedEditor();
+        restoreEditor();
       }
     };
 
     commandPaletteOpen = true;
-    if (!fixedEditorCompositor) installFixedEditorCompositor(ctx, activeTui);
-    if (fixedEditorCompositor) {
-      fixedEditorCompositor.setClusterSuppressed(true);
-      queueMicrotask(showPalette);
-    } else {
-      showPalette();
-    }
+    showPalette();
   };
 
   pi.events?.on("sub-core:ready", (payload) => {
@@ -1374,7 +1199,6 @@ export default function (pi: ExtensionAPI) {
 
     activeCtx = ctx;
     seedStatusDataSnapshot(ctx);
-    markFullSnapshotsDirty();
     activeThinkingLevel = readThinkingLevel();
     scheduleStatusDataRefresh(ctx);
     refreshChatGptQuotaFromSubCore(pi, ctx, () => invalidateStatus("status"));
@@ -1436,7 +1260,6 @@ export default function (pi: ExtensionAPI) {
         const editor = new PiCoderThemeEditor(tui, theme, keybindings, () => activeCtx ?? ctx, getStatusLayout, clearCompletedElapsedTime, markEditorInput, openCommandPalette);
         activeEditor = editor;
         seedEditorHistory(editor, ctx);
-        queueMicrotask(() => installFixedEditorCompositor(ctx, activeTui));
         return editor;
       });
 
@@ -1445,7 +1268,6 @@ export default function (pi: ExtensionAPI) {
       ui.setFooter((tui: TuiLike, _theme: unknown, data?: FooterData) => {
         activeTui = tui;
         footerData = data;
-        queueMicrotask(() => installFixedEditorCompositor(ctx, activeTui));
         return {
           invalidate() {
             invalidateStatus("status");
@@ -1550,7 +1372,6 @@ export default function (pi: ExtensionAPI) {
     statusScheduler?.cancel();
     statusLayoutCache.invalidate();
     statusDataSnapshot = undefined;
-    teardownFixedEditorCompositor(true);
     activeCtx = undefined;
     activeTui = undefined;
     activeEditor = undefined;

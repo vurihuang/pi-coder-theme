@@ -2,10 +2,10 @@
 
 ## Unreleased
 
-- Decouple fixed editor input rendering from cached/debounced status and widget updates to reduce typing lag during background work.
+- Remove the fixed-bottom editor compositor and restore Pi's native editor/widget/footer flow to reduce terminal hot-path overhead.
 - Move git, token usage, and cost aggregation out of the editor render path and into asynchronous status snapshot refreshes.
-- Keep editor input to a single immediate repaint while deferring non-critical status refreshes during typing.
-- Add fixed-editor regression coverage for status ticks, cached git/session data, overlay bypass, resize repaint, and selection repaint.
+- Keep editor chrome, status labels, command palette, structured thinking display, compact user messages, and bundled `pi-tool-display` intact.
+- Rename retained editor status helpers out of the old fixed-editor namespace.
 
 ## 0.2.0
 

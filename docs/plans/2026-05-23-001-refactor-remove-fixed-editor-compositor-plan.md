@@ -1,7 +1,7 @@
 ---
 title: refactor: Remove Fixed Editor Compositor
 type: refactor
-status: active
+status: completed
 date: 2026-05-23
 ---
 

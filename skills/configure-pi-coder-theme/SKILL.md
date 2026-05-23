@@ -86,7 +86,7 @@ For interactive UI verification, start Pi and check startup resources show:
   pi-coder-theme-dark
 ```
 
-The editor should show a rounded bottom input area with context usage, model id, thinking level, cwd, and branch.
+The editor should show Pi Coder Theme rounded editor chrome with context usage, model id, thinking level, cwd, and branch. The input area uses Pi's native placement; it is not pinned by a custom fixed-bottom compositor.
 
 ## Common issues
 

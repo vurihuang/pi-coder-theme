@@ -177,7 +177,7 @@ test("editor schedules follow-up repaints for inputs that may update text asynch
   }
 });
 
-test("async autocomplete results request a fixed editor repaint", async () => {
+test("async autocomplete results request a normal editor repaint", async () => {
   let renderRequests = 0;
   let resolveSuggestions: ((value: unknown) => void) | undefined;
   const editor = createPiCoderThemeEditor(
