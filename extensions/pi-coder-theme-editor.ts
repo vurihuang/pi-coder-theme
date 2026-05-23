@@ -1279,7 +1279,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("thinking_level_select", (event, ctx) => {
     activeThinkingLevel = event.level;
-    if (hasActiveUI(ctx)) invalidateStatus("status");
+    if (hasActiveUI(ctx)) forceStatusRefresh("status");
   });
 
   pi.on("model_select", (_event, ctx) => {
