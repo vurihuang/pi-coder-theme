@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reduce active-agent status render pressure so cosmetic working ticks no longer pull mouse-scrolled terminal history back to the bottom during streaming.
 - Remove the fixed-bottom editor compositor and restore Pi's native editor/widget/footer flow to reduce terminal hot-path overhead.
 - Move git, token usage, and cost aggregation out of the editor render path and into asynchronous status snapshot refreshes.
 - Keep editor chrome, status labels, command palette, structured thinking display, compact user messages, and bundled `pi-tool-display` intact.

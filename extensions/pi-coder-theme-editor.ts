@@ -6,6 +6,7 @@ import {
   buildElapsedTimeLabel,
   buildGitChangesLabel,
   buildModelLabel,
+  buildStatusTickKey,
   buildUsageLabel,
   buildWorkingLabel,
   renderStatusRows,
@@ -24,7 +25,7 @@ const GIT_CACHE_MS = 2000;
 const WORKSPACE_GIT_CHILD_LIMIT = 10;
 const WORKSPACE_GIT_BUDGET_MS = 350;
 const WORKING_FRAMES = ["~", "≈", "≋"];
-const STATUS_TICK_MS = 250;
+const STATUS_TICK_MS = 1000;
 const FIVE_HOUR_SECONDS = 5 * 60 * 60;
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_CHATGPT_QUOTA_REFRESH_MINUTES = 5;
@@ -965,6 +966,7 @@ export default function (pi: ExtensionAPI) {
   let statusDataRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   let statusDataRefreshVersion = 0;
   let workingTimer: ReturnType<typeof setInterval> | undefined;
+  let lastStatusTickKey: string | undefined;
   let quotaRefreshTimer: ReturnType<typeof setInterval> | undefined;
   const configFile = getConfigFile();
 
@@ -1064,15 +1066,26 @@ export default function (pi: ExtensionAPI) {
   };
   const getBackgroundWorkerState = () => backgroundWorkerState;
 
+  const getStatusTickKey = () => buildStatusTickKey(getElapsedTimeState(), backgroundWorkerState, formatAgentElapsedTime);
+
+  const resetStatusTickKey = () => {
+    lastStatusTickKey = getStatusTickKey();
+  };
+
   const stopWorkingTimer = () => {
     if (!workingTimer) return;
     clearInterval(workingTimer);
     workingTimer = undefined;
+    lastStatusTickKey = undefined;
   };
 
   const startWorkingTimer = () => {
+    resetStatusTickKey();
     if (workingTimer) return;
     workingTimer = setInterval(() => {
+      const nextStatusTickKey = getStatusTickKey();
+      if (nextStatusTickKey === lastStatusTickKey) return;
+      lastStatusTickKey = nextStatusTickKey;
       workingFrameIndex = (workingFrameIndex + 1) % WORKING_FRAMES.length;
       invalidateStatus("status");
     }, STATUS_TICK_MS);

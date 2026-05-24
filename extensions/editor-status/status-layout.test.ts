@@ -6,6 +6,7 @@ import {
   buildElapsedTimeLabel,
   buildGitChangesLabel,
   buildModelLabel,
+  buildStatusTickKey,
   buildUsageLabel,
   buildWorkingLabel,
   renderStatusRows,
@@ -67,4 +68,23 @@ test("status label helpers render active work, elapsed time, model, usage, and g
   expect(buildElapsedTimeLabel({ active: true, elapsedMs: 1_500 }, (ms) => `${Math.floor(ms / 1000)}s`, fg)).toBe("[accent]⏱ [accent]1s");
   expect(buildBackgroundWorkerLabel({ state: "running", attempt: 2, workerStartedAt: null, elapsedMs: 60_000 }, { active: true, message: "Working", frame: "≈" }, 120, () => "1m", fg)).toContain("[accent]#2");
   expect(buildGitChangesLabel({ changedFiles: 2, added: 3, modified: 1, removed: 4 }, fg)).toContain("[toolDiffAdded]+3");
+});
+
+test("status tick key changes only when visible elapsed status changes", () => {
+  const formatElapsed = (ms: number) => `${Math.floor(ms / 1000)}s`;
+
+  expect(buildStatusTickKey({ active: true, elapsedMs: 999 }, undefined, formatElapsed)).toBe("|");
+  expect(buildStatusTickKey({ active: true, elapsedMs: 1_000 }, undefined, formatElapsed)).toBe("active:1s|");
+  expect(buildStatusTickKey({ active: false, elapsedMs: 60_000 }, undefined, formatElapsed)).toBe("complete:60s|");
+});
+
+test("status tick key uses cumulative worker elapsed when it exceeds live elapsed", () => {
+  const formatElapsed = (ms: number) => `${Math.floor(ms / 1000)}s`;
+  const now = Date.now();
+
+  expect(buildStatusTickKey(
+    { active: false, elapsedMs: undefined },
+    { state: "running", attempt: 2, workerStartedAt: now - 90_000, elapsedMs: 684_000 },
+    formatElapsed,
+  )).toBe("|running:2:684s");
 });

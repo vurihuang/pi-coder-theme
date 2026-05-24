@@ -139,15 +139,45 @@ export function buildWorkingLabel(working: WorkingStatusInput, fg: StatusColoriz
   return `${fg("accent", working.frame)} ${fg("text", working.message)}  ${cancelHint}`;
 }
 
+function getElapsedDuration(elapsed: ElapsedStatusInput, formatElapsed: (elapsedMs: number) => string): string {
+  if (elapsed.elapsedMs === undefined || (elapsed.active && elapsed.elapsedMs < 1000)) return "";
+  return formatElapsed(elapsed.elapsedMs);
+}
+
+function getElapsedTimeBucket(elapsed: ElapsedStatusInput, formatElapsed: (elapsedMs: number) => string): string {
+  const duration = getElapsedDuration(elapsed, formatElapsed);
+  return duration ? `${elapsed.active ? "active" : "complete"}:${duration}` : "";
+}
+
+function getBackgroundWorkerElapsedMs(worker: BackgroundWorkerStatusInput): number | null {
+  const liveElapsedMs = worker.workerStartedAt !== null ? Date.now() - worker.workerStartedAt : null;
+  return liveElapsedMs !== null && worker.elapsedMs !== null ? Math.max(liveElapsedMs, worker.elapsedMs) : liveElapsedMs ?? worker.elapsedMs;
+}
+
+function getBackgroundWorkerBucket(worker: BackgroundWorkerStatusInput | undefined, formatElapsed: (elapsedMs: number) => string): string {
+  if (!worker) return "";
+  const elapsedMs = getBackgroundWorkerElapsedMs(worker);
+  return `${worker.state}:${worker.attempt}:${elapsedMs === null ? "" : formatElapsed(elapsedMs)}`;
+}
+
+export function buildStatusTickKey(
+  elapsed: ElapsedStatusInput,
+  worker: BackgroundWorkerStatusInput | undefined,
+  formatElapsed: (elapsedMs: number) => string,
+): string {
+  return `${getElapsedTimeBucket(elapsed, formatElapsed)}|${getBackgroundWorkerBucket(worker, formatElapsed)}`;
+}
+
 export function buildElapsedTimeLabel(
   elapsed: ElapsedStatusInput,
   formatElapsed: (elapsedMs: number) => string,
   fg: StatusColorizer,
 ): string {
-  if (elapsed.elapsedMs === undefined || (elapsed.active && elapsed.elapsedMs < 1000)) return "";
+  const duration = getElapsedDuration(elapsed, formatElapsed);
+  if (!duration) return "";
 
   const color = statusTextColor(elapsed.active);
-  return `${fg(color, "⏱")} ${fg(color, formatElapsed(elapsed.elapsedMs))}`;
+  return `${fg(color, "⏱")} ${fg(color, duration)}`;
 }
 
 export function buildBackgroundWorkerLabel(
@@ -159,8 +189,7 @@ export function buildBackgroundWorkerLabel(
 ): string {
   if (!worker) return "";
 
-  const liveElapsedMs = worker.workerStartedAt !== null ? Date.now() - worker.workerStartedAt : null;
-  const elapsedMs = liveElapsedMs !== null && worker.elapsedMs !== null ? Math.max(liveElapsedMs, worker.elapsedMs) : liveElapsedMs ?? worker.elapsedMs;
+  const elapsedMs = getBackgroundWorkerElapsedMs(worker);
   const duration = elapsedMs !== null ? formatElapsed(elapsedMs) : "";
   const color: ThemeColor = worker.state === "failed" ? "error" : worker.state === "recovering" ? "warning" : worker.state === "verifying" ? "muted" : "accent";
   const glyph = worker.state === "running" ? working.frame : worker.state === "verifying" ? "✓" : worker.state === "recovering" ? "!" : worker.state === "failed" ? "×" : "·";

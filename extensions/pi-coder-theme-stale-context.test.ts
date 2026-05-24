@@ -132,6 +132,56 @@ async function renderEditorForCwd(cwd: string, width = 200): Promise<string> {
   return stripAnsi(editor.render(width).join("\n"));
 }
 
+function createEditorRenderHarness() {
+  const { pi, handlers } = createPiStub(() => "medium");
+  piCoderThemeEditorExtension(pi);
+
+  let editorFactory:
+    | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[] })
+    | undefined;
+  let renderRequests = 0;
+  const ctx = {
+    hasUI: true,
+    cwd: process.cwd(),
+    model: { id: "claude-sonnet-4-20250514", contextWindow: 200000, reasoning: true },
+    modelRegistry: { isUsingOAuth: () => false },
+    sessionManager: createSessionManager(),
+    getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+    ui: {
+      theme: createThemeStub(),
+      setEditorComponent(factory: typeof editorFactory) {
+        editorFactory = factory;
+      },
+      setWorkingIndicator() {},
+      setWorkingMessage() {},
+      setWorkingVisible() {},
+      setFooter() {},
+    },
+  } as unknown as ExtensionContext;
+
+  expectDefined(handlers.get("session_start"), "session_start handler should be registered")({ type: "session_start", reason: "startup" }, ctx);
+  expectDefined(editorFactory, "editor factory should be registered")(
+    { requestRender() { renderRequests += 1; }, terminal: { rows: 24 } },
+    createThemeStub(),
+    { matches: () => false },
+  );
+
+  return {
+    pi,
+    handlers,
+    ctx,
+    flushRenderDebounce() {
+      vi.advanceTimersByTime(80);
+    },
+    resetRenderRequests() {
+      renderRequests = 0;
+    },
+    get renderRequests() {
+      return renderRequests;
+    },
+  };
+}
+
 function createSessionManager(thinkingLevel = "medium") {
   const entries = [
     {
@@ -671,6 +721,32 @@ test("pi-coder-theme editor keeps working message ordered while tools are active
   const agentEnd = expectDefined(handlers.get("agent_end"), "agent_end handler should be registered");
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   expect(workingMessages).toEqual(["Streaming response...", "Running tools...", "Waiting for response..."]);
+});
+
+test("pi-coder-theme editor does not render repeated tool updates with unchanged visible status", () => {
+  vi.useFakeTimers();
+
+  try {
+    const harness = createEditorRenderHarness();
+    harness.flushRenderDebounce();
+
+    expectDefined(harness.handlers.get("tool_execution_start"), "tool_execution_start handler should be registered")(
+      { type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: {} },
+      harness.ctx,
+    );
+    harness.flushRenderDebounce();
+    harness.resetRenderRequests();
+
+    expectDefined(harness.handlers.get("tool_execution_update"), "tool_execution_update handler should be registered")(
+      { type: "tool_execution_update", toolCallId: "tool-1", toolName: "read", output: "chunk" },
+      harness.ctx,
+    );
+    harness.flushRenderDebounce();
+
+    expect(harness.renderRequests).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("pi-coder-theme editor renders elapsed task time while active and after completion", () => {
@@ -1386,6 +1462,52 @@ test("pi-coder-theme editor ignores malformed Goal-Driven worker status events",
   const createEditor = expectDefined(editorFactory, "editor factory should be registered");
   const editor = createEditor({ requestRender() {}, terminal: { rows: 24 } }, createTaggedThemeStub(), { matches: () => false });
   expect(editor.render(200).join("\n")).not.toContain("sub");
+});
+
+test("pi-coder-theme editor does not render cosmetic working ticks before elapsed text changes", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-05-21T00:00:00.000Z"));
+
+  try {
+    const harness = createEditorRenderHarness();
+    harness.flushRenderDebounce();
+    harness.resetRenderRequests();
+
+    expectDefined(harness.handlers.get("before_agent_start"), "before_agent_start handler should be registered")({ type: "before_agent_start" }, harness.ctx);
+    harness.flushRenderDebounce();
+    harness.resetRenderRequests();
+
+    vi.advanceTimersByTime(999);
+    expect(harness.renderRequests).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("pi-coder-theme editor does not render worker ticks while cumulative elapsed text is unchanged", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-05-21T00:00:00.000Z"));
+
+  try {
+    const harness = createEditorRenderHarness();
+    harness.flushRenderDebounce();
+
+    harness.pi.events?.emit("goal-driven:runtime-status", {
+      version: 2,
+      provider: "pi-goal-driven",
+      state: "running",
+      attempt: 2,
+      workerStartedAt: Date.now() - 90_000,
+      elapsedMs: 11 * 60 * 1000 + 24 * 1000,
+    });
+    harness.flushRenderDebounce();
+    harness.resetRenderRequests();
+
+    vi.advanceTimersByTime(1_000);
+    expect(harness.renderRequests).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("pi-coder-theme editor shows active elapsed timer after the first status tick", () => {
