@@ -895,6 +895,10 @@ class PiCoderThemeEditor extends CustomEditor {
     return this.sideBorder() + content + padding + this.sideBorder();
   }
 
+  private editorBorderColor(text: string): string {
+    return this.borderColor(text);
+  }
+
   private wrapPopupBlock(lines: string[], width: number): string[] {
     if (lines.length === 0) return [];
 
@@ -913,18 +917,18 @@ class PiCoderThemeEditor extends CustomEditor {
     const right = truncateToWidth(rightLabel, maxRight, "…");
     const used = visibleWidth(left) + visibleWidth(right);
     const fill = Math.max(0, innerWidth - used);
-    return this.borderColor("╭") + left + this.borderColor("─".repeat(fill)) + right + this.borderColor("╮");
+    return this.editorBorderColor("╭") + left + this.editorBorderColor("─".repeat(fill)) + right + this.editorBorderColor("╮");
   }
 
   private sideBorder(): string {
-    return this.borderColor("│");
+    return this.editorBorderColor("│");
   }
 
   private borderWithRightLabel(width: number, label: string): string {
     const innerWidth = Math.max(0, width - 2);
     const right = this.fg("muted", truncateToWidth(label, Math.max(0, innerWidth - 2), "…"));
     const fill = Math.max(0, innerWidth - visibleWidth(right));
-    return this.borderColor("╰") + this.borderColor("─".repeat(fill)) + right + this.borderColor("╯");
+    return this.editorBorderColor("╰") + this.editorBorderColor("─".repeat(fill)) + right + this.editorBorderColor("╯");
   }
 }
 
@@ -979,6 +983,15 @@ export default function (pi: ExtensionAPI) {
     } catch {
       return activeThinkingLevel;
     }
+  };
+  const syncEditorBorderColor = (ctx: ExtensionContext | undefined = activeCtx, level = readThinkingLevel()) => {
+    if (!activeEditor || !hasActiveUI(ctx)) return;
+
+    const theme = ctx.ui.theme as typeof ctx.ui.theme & {
+      getThinkingBorderColor?: (level: string) => (text: string) => string;
+    };
+    const borderColor = theme.getThinkingBorderColor?.(level);
+    if (borderColor) activeEditor.borderColor = borderColor;
   };
   const hasActiveExecution = () => isWorking || subagentTiming.activeRunIds.size > 0;
   const getElapsedTimeState = (): ElapsedTimeState => {
@@ -1248,6 +1261,8 @@ export default function (pi: ExtensionAPI) {
           const elapsedTimeLabel = buildElapsedTimeLabel(getElapsedTimeState(), formatAgentElapsedTime, fg);
           const backgroundWorkerLabel = buildBackgroundWorkerLabel(getBackgroundWorkerState(), working, innerWidth, formatAgentElapsedTime, fg);
           const workingLabel = buildWorkingLabel(working, fg);
+          const gitChangesLabel = buildGitChangesLabel(git, fg);
+          const extensionStatusLabel = getExtensionStatusLabel();
 
           if (tokenUsage) usageParts.push(tokenUsage);
           if (cost.hasCost || cost.usingSubscription) usageParts.push(`${formatCost(cost.total)}${cost.usingSubscription ? " sub" : ""}`);
@@ -1258,17 +1273,17 @@ export default function (pi: ExtensionAPI) {
             topRight: buildModelLabel(
               Math.max(8, Math.floor(innerWidth * 0.48)),
               readThinkingLevel(),
-              getExtensionStatusLabel(),
               (maxWidth) => model ? compactModelReference(model, maxWidth) : "model unknown",
               fg,
             ),
             cwd: buildCwdLabel(compactPath(snapshot.cwd), git.branch),
             statusLeft: [elapsedTimeLabel, backgroundWorkerLabel, workingLabel].filter(Boolean).join(fg("dim", " · ")),
-            statusRight: buildGitChangesLabel(git, fg),
+            statusRight: [gitChangesLabel, extensionStatusLabel].filter(Boolean).join(fg("dim", " · ")),
           };
         });
         const editor = new PiCoderThemeEditor(tui, theme, keybindings, () => activeCtx ?? ctx, getStatusLayout, clearCompletedElapsedTime, invalidateEditorBody, openCommandPalette);
         activeEditor = editor;
+        syncEditorBorderColor(activeCtx ?? ctx);
         seedEditorHistory(editor, ctx);
         return editor;
       });
@@ -1292,11 +1307,14 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("thinking_level_select", (event, ctx) => {
     activeThinkingLevel = event.level;
+    syncEditorBorderColor(ctx, event.level);
     if (hasActiveUI(ctx)) forceStatusRefresh("status");
   });
 
   pi.on("model_select", (_event, ctx) => {
     activeCtx = ctx;
+    activeThinkingLevel = readThinkingLevel();
+    syncEditorBorderColor(ctx, activeThinkingLevel);
     if (hasActiveUI(ctx)) {
       seedStatusDataSnapshot(ctx, true);
       scheduleStatusDataRefresh(ctx, true);
@@ -1307,6 +1325,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", (_event, ctx) => {
     activeThinkingLevel = readThinkingLevel();
+    syncEditorBorderColor(ctx, activeThinkingLevel);
     activeToolExecutions.clear();
     if (executionStartedAt === undefined) executionStartedAt = Date.now();
     isWorking = true;

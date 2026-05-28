@@ -63,7 +63,7 @@ test("status label helpers render active work, elapsed time, model, usage, and g
   const fg = (color: string, text: string) => `[${color}]${text}`;
 
   expect(buildUsageLabel([" 12%/200k", "↑1k", "$0.010"])).toBe(" 12%/200k · ↑1k · $0.010 ");
-  expect(buildModelLabel(60, "medium", "ext", (width) => `model-${width}`, fg)).toContain("[thinkingMedium]medium");
+  expect(buildModelLabel(60, "medium", (width) => `model-${width}`, fg)).toContain("[thinkingMedium]medium");
   expect(buildWorkingLabel({ active: true, message: "Running tools...", frame: "~" }, fg)).toContain("[accent]~");
   expect(buildElapsedTimeLabel({ active: true, elapsedMs: 1_500 }, (ms) => `${Math.floor(ms / 1000)}s`, fg)).toBe("[accent]⏱ [accent]1s");
   expect(buildBackgroundWorkerLabel({ state: "running", attempt: 2, workerStartedAt: null, elapsedMs: 60_000 }, { active: true, message: "Working", frame: "≈" }, 120, () => "1m", fg)).toContain("[accent]#2");

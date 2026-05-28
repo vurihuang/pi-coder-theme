@@ -1155,7 +1155,7 @@ test("pi-coder-theme editor renders working status with an Esc cancel hint", () 
   expect(editor.render(200).join("\n")).toContain("[accent]Esc[muted] to cancel");
 });
 
-test("pi-coder-theme editor renders extension statuses next to the thinking level", () => {
+test("pi-coder-theme editor renders extension statuses at the far right of the bottom status row", () => {
   const { pi, handlers } = createPiStub(() => "medium");
 
   piCoderThemeEditorExtension(pi);
@@ -1212,7 +1212,11 @@ test("pi-coder-theme editor renders extension statuses next to the thinking leve
 
   statuses.set("fast-mode", "⚡ fast");
 
-  expect(editor.render(200).join("\n")).toMatch(/\[thinkingMedium\]medium  \[accent\]⚡ fast/);
+  const rendered = editor.render(200);
+  const statusRow = rendered.at(-1) ?? "";
+  expect(rendered[0]).toContain("[thinkingMedium]medium");
+  expect(rendered[0]).not.toContain("⚡ fast");
+  expect(statusRow.trimEnd().endsWith("⚡ fast")).toBe(true);
 });
 
 test("pi-coder-theme editor renders Goal-Driven worker status in the left status row", () => {
@@ -1705,7 +1709,7 @@ test("pi-coder-theme editor uses latest context and cost after reload", async ()
   expect(editor.render(100).join("\n")).toMatch(/72%\/272k · \$16\.37 sub/);
 });
 
-test("pi-coder-theme editor border follows the runtime border color function", () => {
+test("pi-coder-theme editor border uses one runtime border color for all edges", () => {
   const { pi, handlers } = createPiStub(() => "medium");
 
   piCoderThemeEditorExtension(pi);
@@ -1744,13 +1748,75 @@ test("pi-coder-theme editor border follows the runtime border color function", (
   const createEditor = expectDefined(editorFactory, "editor factory should be registered");
   const editor = createEditor(
     { requestRender() {}, terminal: { rows: 24 } },
+    createTaggedThemeStub(),
+    { matches: () => false },
+  );
+  editor.borderColor = (text: string) => `[runtimeBorder]${text}`;
+
+  const rendered = editor.render(80);
+  expect(rendered[0]).toContain("[runtimeBorder]╭");
+  expect(rendered[0]).toContain("[runtimeBorder]╮");
+  expect(rendered[1].match(/\[runtimeBorder\]│/g)).toHaveLength(2);
+  expect(rendered[2].match(/\[runtimeBorder\]│/g)).toHaveLength(2);
+  expect(rendered[3]).toContain("[runtimeBorder]╰");
+  expect(rendered[3]).toContain("[runtimeBorder]╯");
+});
+
+test("pi-coder-theme editor syncs runtime border color on thinking level changes", () => {
+  const { pi, handlers } = createPiStub(() => "high");
+
+  piCoderThemeEditorExtension(pi);
+
+  let editorFactory:
+    | ((tui: unknown, theme: ThemeStub, keybindings: { matches(): boolean }) => { render(width: number): string[]; borderColor?: (text: string) => string })
+    | undefined;
+
+  const ctx = {
+    hasUI: true,
+    cwd: process.cwd(),
+    model: {
+      id: "claude-sonnet-4-20250514",
+      contextWindow: 200000,
+      reasoning: true,
+    },
+    modelRegistry: { isUsingOAuth: () => false },
+    sessionManager: createSessionManager(),
+    getContextUsage: () => ({ percent: 12, contextWindow: 200000 }),
+    ui: {
+      theme: {
+        ...createThemeStub(),
+        getThinkingBorderColor(level: string) {
+          return (text: string) => `[${level}Border]${text}`;
+        },
+      },
+      setEditorComponent(factory: typeof editorFactory) {
+        editorFactory = factory;
+      },
+      setWorkingIndicator() {},
+      setWorkingMessage() {},
+      setFooter() {},
+    },
+  } as unknown as ExtensionContext;
+
+  const sessionStart = expectDefined(handlers.get("session_start"), "session_start handler should be registered");
+  sessionStart({ type: "session_start", reason: "startup" }, ctx);
+
+  const createEditor = expectDefined(editorFactory, "editor factory should be registered");
+  const editor = createEditor(
+    { requestRender() {}, terminal: { rows: 24 } },
     createThemeStub(),
     { matches: () => false },
   );
+  editor.borderColor = (text: string) => `[offBorder]${text}`;
 
-  editor.borderColor = (text: string) => `[border]${text}`;
+  const thinkingLevelSelect = expectDefined(handlers.get("thinking_level_select"), "thinking_level_select handler should be registered");
+  thinkingLevelSelect({ level: "high", previousLevel: "off" }, ctx);
 
-  expect(editor.render(80).join("\n")).toContain("[border]╭");
+  const rendered = editor.render(80);
+  expect(rendered[0]).toContain("[highBorder]╭");
+  expect(rendered[1].match(/\[highBorder\]│/g)).toHaveLength(2);
+  expect(rendered[2].match(/\[highBorder\]│/g)).toHaveLength(2);
+  expect(rendered[3]).toContain("[highBorder]╰");
 });
 
 test("pi-coder-theme editor uses runtime thinking level after resume when session has no thinking entry", () => {

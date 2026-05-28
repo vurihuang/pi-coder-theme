@@ -115,17 +115,14 @@ export function buildUsageLabel(parts: string[]): string {
 export function buildModelLabel(
   maxWidth: number,
   thinkingLevel: string,
-  extensionStatusLabel: string,
   compactModel: (maxWidth: number) => string,
   fg: StatusColorizer,
 ): string {
-  const thinkingStatus = [thinkingLevel, extensionStatusLabel].filter(Boolean).join("  ");
-  const thinkingStatusWidth = visibleWidth(thinkingStatus);
+  const thinkingStatusWidth = visibleWidth(thinkingLevel);
   const modelWidth = Math.max(1, maxWidth - thinkingStatusWidth - 3);
   const styledModel = fg("text", compactModel(modelWidth));
   const thinking = fg(thinkingColor(thinkingLevel), thinkingLevel);
-  const extensionStatus = extensionStatusLabel ? `  ${fg("accent", extensionStatusLabel)}` : "";
-  return ` ${styledModel} ${fg("dim", "·")} ${thinking}${extensionStatus} `;
+  return ` ${styledModel} ${fg("dim", "·")} ${thinking} `;
 }
 
 export function buildCwdLabel(pathLabel: string, branch: string | null): string {
