@@ -18,9 +18,9 @@ import { BUILTIN_COMMAND_PALETTE_ITEMS, CommandPaletteOverlay, type CommandPalet
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, relative } from "node:path";
+import { basename, join } from "node:path";
 
-const MIN_BODY_LINES = 2;
+const MIN_BODY_LINES = 1;
 const GIT_CACHE_MS = 2000;
 const WORKSPACE_GIT_CHILD_LIMIT = 10;
 const WORKSPACE_GIT_BUDGET_MS = 350;
@@ -532,11 +532,8 @@ function compactModelReference(model: NonNullable<ExtensionContext["model"]>, ma
   return truncateToWidth(modelRef, maxWidth, "…");
 }
 
-function compactPath(cwd: string): string {
-  const home = homedir();
-  if (cwd === home) return "~";
-  if (cwd.startsWith(`${home}/`)) return `~/${relative(home, cwd)}`;
-  return cwd;
+function compactProjectPath(cwd: string): string {
+  return basename(cwd) || cwd;
 }
 
 function isEditorRule(line: string): boolean {
@@ -868,10 +865,13 @@ class PiCoderThemeEditor extends CustomEditor {
 
     const statusLayout = this.getStatusLayout(width);
 
+    const lastBodyIndex = body.length - 1;
+
     return [
       this.borderWithLabels(width, statusLayout.topLeft, statusLayout.topRight),
-      ...body.map((line) => this.wrapBody(line, innerWidth)),
-      this.borderWithRightLabel(width, statusLayout.cwd),
+      ...body.map((line, index) => index === lastBodyIndex
+        ? this.wrapBottomBody(line, innerWidth, statusLayout.cwd)
+        : this.wrapBody(line, innerWidth)),
       ...renderStatusRows(width, statusLayout.statusLeft, statusLayout.statusRight),
       ...this.wrapPopupBlock(popupLines, width),
     ];
@@ -893,6 +893,16 @@ class PiCoderThemeEditor extends CustomEditor {
     const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped)));
     const content = clipped ? this.fg("text", clipped) : clipped;
     return this.sideBorder() + content + padding + this.sideBorder();
+  }
+
+  private wrapBottomBody(line: string, innerWidth: number, rightLabel: string): string {
+    const contentWidth = Math.max(0, innerWidth - 2);
+    const clipped = truncateToWidth(line.trimEnd(), contentWidth, "");
+    const content = clipped ? this.fg("text", clipped) : clipped;
+    const labelWidth = Math.max(0, contentWidth - visibleWidth(clipped) - 1);
+    const right = rightLabel && labelWidth > 0 ? this.fg("muted", truncateToWidth(rightLabel, labelWidth, "…")) : "";
+    const padding = " ".repeat(Math.max(0, contentWidth - visibleWidth(clipped) - visibleWidth(right)));
+    return this.editorBorderColor("╰─") + content + padding + right + this.editorBorderColor("─╯");
   }
 
   private editorBorderColor(text: string): string {
@@ -924,12 +934,6 @@ class PiCoderThemeEditor extends CustomEditor {
     return this.editorBorderColor("│");
   }
 
-  private borderWithRightLabel(width: number, label: string): string {
-    const innerWidth = Math.max(0, width - 2);
-    const right = this.fg("muted", truncateToWidth(label, Math.max(0, innerWidth - 2), "…"));
-    const fill = Math.max(0, innerWidth - visibleWidth(right));
-    return this.editorBorderColor("╰") + this.editorBorderColor("─".repeat(fill)) + right + this.editorBorderColor("╯");
-  }
 }
 
 function getCommandPaletteItems(pi: ExtensionAPI): CommandPaletteItem[] {
@@ -1276,7 +1280,7 @@ export default function (pi: ExtensionAPI) {
               (maxWidth) => model ? compactModelReference(model, maxWidth) : "model unknown",
               fg,
             ),
-            cwd: buildCwdLabel(compactPath(snapshot.cwd), git.branch),
+            cwd: buildCwdLabel(compactProjectPath(snapshot.cwd), git.branch),
             statusLeft: [elapsedTimeLabel, backgroundWorkerLabel, workingLabel].filter(Boolean).join(fg("dim", " · ")),
             statusRight: [gitChangesLabel, extensionStatusLabel].filter(Boolean).join(fg("dim", " · ")),
           };

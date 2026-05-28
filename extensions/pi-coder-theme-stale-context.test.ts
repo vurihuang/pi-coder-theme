@@ -300,7 +300,8 @@ test("pi-coder-theme editor renders existing single-repo Git changes", async () 
     const repo = await createChangedGitRepo(root, "repo");
     const rendered = await renderEditorForCwd(repo);
     expect(rendered).toContain("1 file changed +1 ~1");
-    expect(rendered).toContain("(main)");
+    expect(rendered).toContain("repo (main)");
+    expect(rendered).not.toContain(root);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1757,9 +1758,8 @@ test("pi-coder-theme editor border uses one runtime border color for all edges",
   expect(rendered[0]).toContain("[runtimeBorder]╭");
   expect(rendered[0]).toContain("[runtimeBorder]╮");
   expect(rendered[1].match(/\[runtimeBorder\]│/g)).toHaveLength(2);
-  expect(rendered[2].match(/\[runtimeBorder\]│/g)).toHaveLength(2);
-  expect(rendered[3]).toContain("[runtimeBorder]╰");
-  expect(rendered[3]).toContain("[runtimeBorder]╯");
+  expect(rendered[2]).toContain("[runtimeBorder]╰─");
+  expect(rendered[2]).toContain("[runtimeBorder]─╯");
 });
 
 test("pi-coder-theme editor syncs runtime border color on thinking level changes", () => {
@@ -1815,8 +1815,8 @@ test("pi-coder-theme editor syncs runtime border color on thinking level changes
   const rendered = editor.render(80);
   expect(rendered[0]).toContain("[highBorder]╭");
   expect(rendered[1].match(/\[highBorder\]│/g)).toHaveLength(2);
-  expect(rendered[2].match(/\[highBorder\]│/g)).toHaveLength(2);
-  expect(rendered[3]).toContain("[highBorder]╰");
+  expect(rendered[2]).toContain("[highBorder]╰─");
+  expect(rendered[2]).toContain("[highBorder]─╯");
 });
 
 test("pi-coder-theme editor uses runtime thinking level after resume when session has no thinking entry", () => {
