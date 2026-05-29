@@ -68,52 +68,42 @@ function fitLine(line: string, width: number): string {
   return truncateToWidth(line, Math.max(0, width), "");
 }
 
+function renderThinkingHeader(theme: ThinkingThemeLike, width: number, isActive: boolean, nowMs: number): string {
+  const status = isActive ? pulseGlyph(theme, nowMs) : theme.fg("success", "●");
+  return fitLine(`${status} ${theme.fg("toolTitle", "Thinking")}`, width);
+}
+
+function renderTreeStep(theme: ThinkingThemeLike, width: number, step: DerivedThinkingStep, active: boolean, connector: string): string[] {
+  const prefix = ` ${theme.fg("dim", connector)} ${theme.fg(roleColor(step.role), step.icon)} `;
+  const continuationPrefix = `${theme.fg("dim", connector === "└─" ? "    " : " │  ")}${" ".repeat(visibleWidth(step.icon) + 1)}`;
+  const wrapped = wrapTextWithAnsi(styleSummary(theme, step.summary, active), Math.max(1, width - visibleWidth(prefix)));
+
+  if (wrapped.length === 0) return [fitLine(prefix, width)];
+
+  return wrapped.map((line, index) => fitLine(`${index === 0 ? prefix : continuationPrefix}${line}`, width));
+}
+
 function renderCompact(options: RenderThinkingStepsOptions): string[] {
   const { width, steps, theme, activeStepId, isActive, nowMs = Date.now() } = options;
   const step = pickCompactStep(steps, activeStepId);
   if (!step) return [];
 
-  const activity = isActive ? pulseGlyph(theme, nowMs) : theme.fg("dim", "·");
-  const prefix = `${theme.fg("muted", "│")} ${theme.fg("dim", "Thinking")} ${theme.fg(roleColor(step.role), step.icon)} `;
-  const suffix = ` ${activity}`;
-  const summaryWidth = Math.max(1, width - visibleWidth(prefix) - visibleWidth(suffix));
-  const summaryLines = wrapTextWithAnsi(styleSummary(theme, step.summary, isActive), summaryWidth);
-
-  if (summaryLines.length <= 1) {
-    return [fitLine(`${prefix}${summaryLines[0] ?? ""}${suffix}`, width)];
-  }
-
-  const continuationPrefix = `${theme.fg("muted", "│")} ${" ".repeat(visibleWidth(`Thinking ${step.icon} `))}`;
-  const continuationWidth = Math.max(1, width - visibleWidth(continuationPrefix) - visibleWidth(suffix));
-  const rewrapped = wrapTextWithAnsi(styleSummary(theme, step.summary, isActive), continuationWidth);
-
-  return rewrapped.map((line, index) => {
-    const isFirst = index === 0;
-    const isLast = index === rewrapped.length - 1;
-    return fitLine(`${isFirst ? prefix : continuationPrefix}${line}${isLast ? suffix : ""}`, width);
-  });
-}
-
-function renderStepHeader(theme: ThinkingThemeLike, width: number, step: DerivedThinkingStep, active: boolean, connector: string): string[] {
-  const prefix = `${theme.fg("muted", connector)} ${theme.fg(roleColor(step.role), step.icon)} `;
-  const wrapped = wrapTextWithAnsi(styleSummary(theme, step.summary, active), Math.max(1, width - visibleWidth(prefix)));
-
-  if (wrapped.length === 0) return [fitLine(prefix, width)];
-
-  const continuationPrefix = `${theme.fg("muted", "│ ")}${" ".repeat(visibleWidth(step.icon) + 1)}`;
-  return wrapped.map((line, index) => fitLine(`${index === 0 ? prefix : continuationPrefix}${line}`, width));
+  return [
+    renderThinkingHeader(theme, width, isActive, nowMs),
+    ...renderTreeStep(theme, width, step, isActive, "└─"),
+  ];
 }
 
 function renderSummary(options: RenderThinkingStepsOptions): string[] {
-  const { width, steps, theme, activeStepId } = options;
+  const { width, steps, theme, activeStepId, isActive, nowMs = Date.now() } = options;
   if (steps.length === 0) return [];
 
   const visibleSteps = steps.length > 6 ? [...steps.slice(0, 2), ...steps.slice(-4)] : steps;
-  const lines = [fitLine(`${theme.fg("muted", "┆")} ${theme.fg("accent", "Thinking Steps")}`, width)];
+  const lines = [renderThinkingHeader(theme, width, isActive, nowMs)];
 
   visibleSteps.forEach((step, index) => {
     const connector = index === visibleSteps.length - 1 ? "└─" : "├─";
-    lines.push(...renderStepHeader(theme, width, step, step.id === activeStepId, connector));
+    lines.push(...renderTreeStep(theme, width, step, step.id === activeStepId, connector));
   });
 
   return lines;

@@ -17,23 +17,22 @@ const theme: ThinkingThemeLike = {
   },
 };
 
-test("renders a compact thinking line with label, icon, and summary", () => {
+test("renders compact thinking with a Task-style header and branch", () => {
   const steps = deriveThinkingSteps([{ contentIndex: 0, text: "Plan the renderer." }]);
 
-  const rendered = renderThinkingSteps({ mode: "compact", width: 80, steps, theme, isActive: false }).join("\n");
-
-  expect(rendered).toContain("Thinking");
-  expect(rendered).toContain("◇");
-  expect(rendered).toContain("Plan the renderer.");
+  expect(renderThinkingSteps({ mode: "compact", width: 80, steps, theme, isActive: false })).toEqual([
+    "[success]● [toolTitle]Thinking",
+    " [dim]└─ [accent]◇ [thinkingText]Plan the renderer.",
+  ]);
 });
 
 test("renders multiple complete steps in summary order", () => {
   const steps = deriveThinkingSteps([{ contentIndex: 0, text: "Inspect parser.\n\nVerify renderer." }]);
 
   expect(renderThinkingSteps({ mode: "summary", width: 80, steps, theme, isActive: false })).toEqual([
-    "[muted]┆ [accent]Thinking Steps",
-    "[muted]├─ [mdLink]◫ [thinkingText]Inspect parser.",
-    "[muted]└─ [success]✓ [thinkingText]Verify renderer.",
+    "[success]● [toolTitle]Thinking",
+    " [dim]├─ [mdLink]◫ [thinkingText]Inspect parser.",
+    " [dim]└─ [success]✓ [thinkingText]Verify renderer.",
   ]);
 });
 

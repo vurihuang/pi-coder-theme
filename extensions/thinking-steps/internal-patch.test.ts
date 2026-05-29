@@ -96,7 +96,7 @@ test("thinking steps do not keep stale padded height after content shrinks", () 
     content: [{ type: "thinking", thinking: "Done." }],
   });
   const shortLines = children[1]?.render?.(24) ?? [];
-  expect(shortLines).toHaveLength(1);
+  expect(shortLines).toHaveLength(2);
 
   release();
 });
